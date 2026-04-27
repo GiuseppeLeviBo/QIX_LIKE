@@ -4,7 +4,7 @@ Arcade territory duel inspired by the classic Qix formula, built as a modern bro
 
 ## Play
 
-Open `qix-style-standalone.html` directly in a browser.
+Open `qix-style-standalone.html` directly in a browser. 
 
 The game starts in cabinet attract mode:
 
