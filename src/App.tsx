@@ -1467,7 +1467,8 @@ export default function App() {
   const attractSeconds = attract.phase === "off" ? 0 : Math.max(0, Math.ceil(((attractDuration - attract.ticks) * TICK_MS) / 1000));
   const modeText =
     attract.phase === "title" ? "Titolo" : attract.phase === "demo" ? "Demo" : attract.phase === "scores" ? "Classifica" : "Gioco";
-  const focusedPlay = attract.phase === "off" && hud.status === "playing" && !autoPlay;
+  const focusedPlay =
+    attract.phase === "off" && (hud.status === "playing" || hud.status === "paused" || hud.status === "won") && !autoPlay;
   const showInfoPanel = !focusedPlay;
   const submitHighScore = () => {
     if (!pendingScore) return;
@@ -1479,6 +1480,11 @@ export default function App() {
     setHighScores(nextScores);
     pendingScoreRef.current = null;
     setPendingScore(null);
+  };
+  const resetHighScores = () => {
+    if (!window.confirm("Cancellare tutti gli high-score salvati su questo browser?")) return;
+    localStorage.removeItem(HIGH_SCORE_KEY);
+    setHighScores([]);
   };
 
   return (
@@ -1571,6 +1577,15 @@ export default function App() {
                     )}
                   </ol>
                   <p className="mt-8 text-center text-sm uppercase tracking-widest text-cyan-300">Space Insert Coin · R Start</p>
+                  {highScores.length > 0 && (
+                    <button
+                      className="mx-auto mt-5 block border border-cyan-300/60 px-4 py-2 text-xs font-black uppercase tracking-widest text-cyan-100 hover:border-cyan-100 hover:text-white"
+                      type="button"
+                      onClick={resetHighScores}
+                    >
+                      Reset High Scores
+                    </button>
+                  )}
                   <p className="mt-2 text-center text-xs uppercase tracking-widest text-cyan-100/55">Title in {attractSeconds}</p>
                 </div>
               </div>
@@ -1624,6 +1639,15 @@ export default function App() {
                   ))
                 )}
               </ol>
+              {highScores.length > 0 && (
+                <button
+                  className="mt-3 w-full border border-cyan-300/60 px-3 py-2 font-black uppercase tracking-widest text-cyan-100 hover:border-cyan-100 hover:text-white"
+                  type="button"
+                  onClick={resetHighScores}
+                >
+                  Reset High Scores
+                </button>
+              )}
             </div>
           </aside>
           )}
