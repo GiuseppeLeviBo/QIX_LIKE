@@ -1,8 +1,10 @@
 {
   "name": "QIX®-STYLE",
   "short_name": "QIX®",
+  "id": "./qix-style-standalone.html",
   "description": "Arcade territory duel with 90s-style high scores.",
   "start_url": "./qix-style-standalone.html",
+  "scope": "./",
   "display": "standalone",
   "background_color": "#030712",
   "theme_color": "#030712",
