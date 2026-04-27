@@ -1,5 +1,5 @@
-const CACHE_NAME = "qix-style-standalone-v2";
-const ASSETS = ["./qix-style-standalone.html", "./manifest.webmanifest", "./icon.svg"];
+const CACHE_NAME = "qix-style-standalone-v3";
+const ASSETS = ["./qix-style-standalone.html", "./standalone.manifest.webmanifest", "./icon.svg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
