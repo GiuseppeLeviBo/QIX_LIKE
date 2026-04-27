@@ -1,4 +1,4 @@
-const CACHE_NAME = "qix-style-v1";
+const CACHE_NAME = "qix-style-v2";
 const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg"];
 
 self.addEventListener("install", (event) => {
