@@ -6,6 +6,11 @@ Arcade territory duel inspired by the classic Qix formula, built as a modern bro
 
 Open `qix-style-standalone.html` directly in a browser. 
 
+Published web version:
+
+- Main game: `https://giuseppelevibo.github.io/QIX_LIKE/`
+- Recommended install/open link for the hosted PWA: `https://giuseppelevibo.github.io/QIX_LIKE/qix-style-standalone.html`
+
 The game starts in cabinet attract mode:
 
 - Title screen: about 10 seconds
@@ -70,7 +75,7 @@ Keep these in the repository:
 - `package-lock.json`
 - `tsconfig.json`
 - `vite.config.ts`
-- root standalone/PWA assets: `qix-style-standalone.html`, `manifest.webmanifest`, `sw.js`, `icon.svg`
+- root standalone assets: `qix-style-standalone.html`, `standalone.manifest.webmanifest`, `sw.js`, `icon.svg`
 
 Do not commit:
 
