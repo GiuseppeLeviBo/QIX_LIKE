@@ -1467,6 +1467,8 @@ export default function App() {
   const attractSeconds = attract.phase === "off" ? 0 : Math.max(0, Math.ceil(((attractDuration - attract.ticks) * TICK_MS) / 1000));
   const modeText =
     attract.phase === "title" ? "Titolo" : attract.phase === "demo" ? "Demo" : attract.phase === "scores" ? "Classifica" : "Gioco";
+  const focusedPlay = attract.phase === "off" && hud.status === "playing" && !autoPlay;
+  const showInfoPanel = !focusedPlay;
   const submitHighScore = () => {
     if (!pendingScore) return;
     const nextScores = insertHighScore(highScores, {
@@ -1481,13 +1483,29 @@ export default function App() {
 
   return (
     <main className="min-h-screen bg-[#030712] text-cyan-50">
-      <div className="mx-auto flex min-h-screen max-w-7xl flex-col px-4 py-5 sm:px-6 lg:px-8">
-        <header className="flex flex-wrap items-end justify-between gap-4 border-b border-cyan-300/20 pb-4">
+      <div
+        className={`mx-auto flex min-h-screen w-full flex-col ${
+          focusedPlay ? "max-w-none px-2 py-2 sm:px-3 lg:px-4" : "max-w-7xl px-4 py-5 sm:px-6 lg:px-8"
+        }`}
+      >
+        <header
+          className={`flex flex-wrap items-end justify-between gap-4 border-b border-cyan-300/20 ${
+            focusedPlay ? "pb-2" : "pb-4"
+          }`}
+        >
           <div>
-            <p className="font-mono text-sm uppercase tracking-[0.45em] text-cyan-300/75">arcade territory duel</p>
-            <h1 className="font-mono text-4xl font-black tracking-tight text-white sm:text-6xl">QIX®-STYLE</h1>
+            {!focusedPlay && (
+              <p className="font-mono text-sm uppercase tracking-[0.45em] text-cyan-300/75">arcade territory duel</p>
+            )}
+            <h1 className={`font-mono font-black tracking-tight text-white ${focusedPlay ? "text-2xl sm:text-3xl" : "text-4xl sm:text-6xl"}`}>
+              QIX®-STYLE
+            </h1>
           </div>
-          <div className="grid grid-cols-2 gap-x-8 gap-y-1 font-mono text-sm sm:grid-cols-3 xl:grid-cols-7">
+          <div
+            className={`grid grid-cols-2 gap-y-1 font-mono text-sm sm:grid-cols-3 xl:grid-cols-7 ${
+              focusedPlay ? "gap-x-4" : "gap-x-8"
+            }`}
+          >
             <span><b className="text-cyan-300">Livello</b> {hud.level}</span>
             <span><b className="text-cyan-300">Score</b> {hud.score}</span>
             <span><b className="text-cyan-300">Area</b> {hud.percent}%/{TARGET_PERCENT}%</span>
@@ -1498,8 +1516,14 @@ export default function App() {
           </div>
         </header>
 
-        <section className="grid flex-1 items-center gap-6 py-6 lg:grid-cols-[1fr_310px]">
-          <div className="relative overflow-hidden border border-cyan-300/35 bg-black shadow-[0_0_50px_rgba(34,211,238,0.18)]">
+        <section
+          className={`grid flex-1 items-center gap-6 ${focusedPlay ? "py-2 lg:grid-cols-1" : "py-6 lg:grid-cols-[1fr_310px]"}`}
+        >
+          <div
+            className={`relative overflow-hidden border border-cyan-300/35 bg-black shadow-[0_0_50px_rgba(34,211,238,0.18)] ${
+              focusedPlay ? "mx-auto w-full max-w-[calc((100vh-7.5rem)*1.4667)]" : ""
+            }`}
+          >
             <canvas
               ref={canvasRef}
               width={COLS * CELL}
@@ -1553,6 +1577,7 @@ export default function App() {
             )}
           </div>
 
+          {showInfoPanel && (
           <aside className="space-y-6 font-mono text-sm leading-6 text-cyan-100/80">
             <div>
               <h2 className="mb-2 text-xl font-black uppercase tracking-widest text-white">Come si gioca</h2>
@@ -1601,6 +1626,7 @@ export default function App() {
               </ol>
             </div>
           </aside>
+          )}
         </section>
 
         {pendingScore && (
