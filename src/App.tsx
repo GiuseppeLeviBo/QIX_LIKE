@@ -198,7 +198,7 @@ function createSparks(level: number) {
   return sparks;
 }
 
-function createInitialGame(level = 1) {
+function createInitialGame(level = 1, score = 0, lives = START_LIVES) {
   const claimed = createClaimed();
   return {
     claimed,
@@ -214,12 +214,12 @@ function createInitialGame(level = 1) {
     trailSet: new Set<string>(),
     qix: resetQix(level),
     sparks: createSparks(level),
-    score: 0,
+    score,
     percent: areaPercent(claimed),
-    lives: START_LIVES,
+    lives,
     level,
     status: "ready" as GameStatus,
-    message: `Livello ${level} — Premi una freccia o WASD per iniziare`,
+    message: `Livello ${level} - Premi una freccia o WASD per iniziare`,
   };
 }
 
@@ -691,7 +691,7 @@ function claimClosedArea(game: Game): Game {
     score,
     status: percent >= TARGET_PERCENT ? "won" : game.status,
     message: percent >= TARGET_PERCENT
-      ? `Livello ${game.level} completato! Premi N per il prossimo livello o R per ricominciare`
+      ? `Livello ${game.level} completato! Premi N per continuare`
       : destroyedSparks > 0
         ? `${destroyedSparks} Sparx catturato${destroyedSparks > 1 ? "i" : ""}! Bonus ${destroyedSparks * SPARK_CAPTURE_BONUS * game.level}`
         : "",
@@ -971,7 +971,9 @@ function applyAutoplay(game: Game, pilot: AutoPilotState) {
     pilot.endTicks += 1;
     if (pilot.endTicks < AUTOPLAY_SETTLE_TICKS) return { ...game, dir: ZERO_DIR };
     const nextLevel = game.status === "won" ? game.level + 1 : 1;
-    return { ...createInitialGame(nextLevel), status: "playing", message: "" };
+    const nextScore = game.status === "won" ? game.score : 0;
+    const nextLives = game.status === "won" ? game.lives : START_LIVES;
+    return { ...createInitialGame(nextLevel, nextScore, nextLives), status: "playing", message: "" };
   }
 
   pilot.endTicks = 0;
@@ -1350,7 +1352,11 @@ export default function App() {
       if (event.code === "KeyN") {
         if (gameRef.current.status === "won") {
           resetPromptState();
-          gameRef.current = createInitialGame(gameRef.current.level + 1);
+          gameRef.current = {
+            ...createInitialGame(gameRef.current.level + 1, gameRef.current.score, gameRef.current.lives),
+            status: "playing",
+            message: "",
+          };
           sync();
         }
         return;
@@ -1405,7 +1411,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (hud.status !== "lost" && hud.status !== "won") return;
+    if (hud.status !== "lost") return;
 
     const promptKey = `${hud.status}:${hud.score}:${hud.level}:${hud.percent}`;
     if (promptedScoreRef.current === promptKey) return;
@@ -1433,11 +1439,7 @@ export default function App() {
       tickAttract();
       gameRef.current = applyAutoplay(gameRef.current, autoPilotRef.current);
       gameRef.current = stepGame(gameRef.current);
-      if (
-        attractRef.current.phase === "off" &&
-        (gameRef.current.status === "lost" || gameRef.current.status === "won") &&
-        !pendingScoreRef.current
-      ) {
+      if (attractRef.current.phase === "off" && gameRef.current.status === "lost" && !pendingScoreRef.current) {
         postGameIdleTicksRef.current += 1;
         if (postGameIdleTicksRef.current >= POST_GAME_ATTRACT_TICKS) {
           postGameIdleTicksRef.current = 0;
@@ -1568,9 +1570,10 @@ export default function App() {
                       <li className="text-center text-cyan-100/55">No Records</li>
                     ) : (
                       highScores.map((entry, index) => (
-                        <li key={`${entry.initials}-${entry.score}-${entry.date}`} className="grid grid-cols-[3ch_5ch_1fr] gap-4">
+                        <li key={`${entry.initials}-${entry.score}-${entry.date}`} className="grid grid-cols-[3ch_5ch_4ch_1fr] gap-4">
                           <span className="text-cyan-300">{String(index + 1).padStart(2, "0")}</span>
                           <span className="font-black text-white">{entry.initials}</span>
+                          <span className="text-cyan-300 tabular-nums">L{entry.level}</span>
                           <span className="text-right tabular-nums">{entry.score}</span>
                         </li>
                       ))
@@ -1631,9 +1634,10 @@ export default function App() {
                   <li className="text-cyan-100/50">---</li>
                 ) : (
                   highScores.map((entry, index) => (
-                    <li key={`${entry.initials}-${entry.score}-${entry.date}`} className="grid grid-cols-[2ch_4ch_1fr] gap-3">
+                    <li key={`${entry.initials}-${entry.score}-${entry.date}`} className="grid grid-cols-[2ch_4ch_4ch_1fr] gap-3">
                       <span className="text-cyan-300">{String(index + 1).padStart(2, "0")}</span>
                       <span className="text-white">{entry.initials}</span>
+                      <span className="text-cyan-300 tabular-nums">L{entry.level}</span>
                       <span className="text-right tabular-nums">{entry.score}</span>
                     </li>
                   ))
