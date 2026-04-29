@@ -1,20 +1,48 @@
 import { useEffect, useRef, useState } from "react";
 
 type Point = { x: number; y: number };
-type GameStatus = "ready" | "playing" | "paused" | "won" | "lost";
-type AttractPhase = "title" | "demo" | "scores" | "off";
-type HighScoreEntry = { initials: string; score: number; level: number; percent: number; date: string };
-type PendingScore = Omit<HighScoreEntry, "initials">;
+type GameStatus = "ready" | "playing" | "paused" | "won" | "lost" | "enterName" | "splash" | "demo" | "attractScores";
 type Game = ReturnType<typeof createInitialGame>;
-type AttractState = { phase: AttractPhase; ticks: number };
-type AutoPilotState = {
-  enabled: boolean;
-  route: Point[];
-  endTicks: number;
-  stuckTicks: number;
-  lastPlayerKey: string;
+
+const SPLASH_DURATION = 10000;
+const DEMO_DURATION = 20000;
+const SCORES_DURATION = 10000;
+const LEVEL_COMPLETE_DURATION = 5000;
+
+type HighScore = {
+  initials: string;
+  score: number;
+  level: number;
 };
-type DebugWindow = Window & { __qixDebug?: unknown };
+
+const HIGH_SCORES_KEY = "qix_high_scores";
+const MAX_HIGH_SCORES = 10;
+
+function loadHighScores(): HighScore[] {
+  try {
+    const data = localStorage.getItem(HIGH_SCORES_KEY);
+    if (data) return JSON.parse(data);
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+function saveHighScores(scores: HighScore[]) {
+  try {
+    localStorage.setItem(HIGH_SCORES_KEY, JSON.stringify(scores));
+  } catch {
+    // ignore
+  }
+}
+
+function addHighScore(scores: HighScore[], newScore: HighScore): HighScore[] {
+  const updated = [...scores, newScore]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_HIGH_SCORES);
+  saveHighScores(updated);
+  return updated;
+}
 
 const COLS = 88;
 const ROWS = 60;
@@ -22,36 +50,20 @@ const CELL = 10;
 const TICK_MS = 52;
 const TARGET_PERCENT = 75;
 const START_LIVES = 3;
-const HIGH_SCORE_LIMIT = 10;
-const HIGH_SCORE_KEY = "qix-style-high-scores";
-const MAX_SPARKS = 5;
-const BASE_QIX_SPEED = 1.18;
-const QIX_LEVEL_SPEED_STEP = 0.12;
-const QIX_LOOKAHEAD = 8;
-const BASE_SPARK_SPEED = 0.9;
-const QIX_BODY_RADIUS = 2;
-const QIX_TRAIL_TOUCH_RADIUS = 2;
-const SPARK_TRAIL_TOUCH_RADIUS = 1;
-const SPARK_CAPTURE_BONUS = 2500;
-const SLOW_DRAW_MULTIPLIER = 2;
-const FUSE_SPEED = 0.35;
-const AUTOPLAY_SETTLE_TICKS = 36;
-const AUTOPLAY_MAX_ROUTE = 24;
-const AUTOPLAY_QIX_DANGER = 18;
-const AUTOPLAY_SPARK_DANGER = 8;
-const ATTRACT_TITLE_TICKS = Math.round(10000 / TICK_MS);
-const ATTRACT_DEMO_TICKS = Math.round(20000 / TICK_MS);
-const ATTRACT_SCORES_TICKS = Math.round(10000 / TICK_MS);
-const POST_GAME_ATTRACT_TICKS = Math.round(10000 / TICK_MS);
-const ZERO_DIR: Point = { x: 0, y: 0 };
-const LEGAL_NOTICE =
-  "QIX® è un marchio registrato di TAITO CORPORATION. Questo progetto è un omaggio indipendente non affiliato, sponsorizzato o approvato da TAITO CORPORATION.";
-const CARDINALS: Point[] = [
-  { x: 1, y: 0 },
-  { x: -1, y: 0 },
-  { x: 0, y: 1 },
-  { x: 0, y: -1 },
-];
+const MAX_SPARKS = 6;
+const BASE_QIX_SPEED = 0.65;
+const BASE_SPARK_SPEED = 0.45;
+
+type Spark = {
+  x: number;
+  y: number;
+  dx: number;
+  dy: number;
+  speed: number;
+  progress: number;
+  // Track distance along a perimeter for coordinated movement
+  perimeterIndex: number;
+};
 const DIRS: Record<string, Point> = {
   ArrowUp: { x: 0, y: -1 },
   KeyW: { x: 0, y: -1 },
@@ -62,6 +74,12 @@ const DIRS: Record<string, Point> = {
   ArrowRight: { x: 1, y: 0 },
   KeyD: { x: 1, y: 0 },
 };
+const CARDINALS = [
+  { x: 1, y: 0 },
+  { x: -1, y: 0 },
+  { x: 0, y: 1 },
+  { x: 0, y: -1 },
+];
 
 function key(x: number, y: number) {
   return `${x},${y}`;
@@ -69,26 +87,6 @@ function key(x: number, y: number) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
-}
-
-function perimeterLength() {
-  return (COLS - 1) * 2 + (ROWS - 1) * 2;
-}
-
-function normalizePerimeterIndex(value: number) {
-  const perimeter = perimeterLength();
-  return ((value % perimeter) + perimeter) % perimeter;
-}
-
-function perimeterPoint(index: number): Point {
-  let n = normalizePerimeterIndex(index);
-  if (n < COLS - 1) return { x: n, y: 0 };
-  n -= COLS - 1;
-  if (n < ROWS - 1) return { x: COLS - 1, y: n };
-  n -= ROWS - 1;
-  if (n < COLS - 1) return { x: COLS - 1 - n, y: ROWS - 1 };
-  n -= COLS - 1;
-  return { x: 0, y: ROWS - 1 - n };
 }
 
 function createClaimed() {
@@ -99,10 +97,6 @@ function createClaimed() {
     }
   }
   return grid;
-}
-
-function createSlowClaimed() {
-  return Array.from({ length: ROWS }, () => Array(COLS).fill(false) as boolean[]);
 }
 
 function copyClaimed(grid: boolean[][]) {
@@ -119,521 +113,284 @@ function areaPercent(grid: boolean[][]) {
   return Math.floor((claimed / (COLS * ROWS)) * 100);
 }
 
-function normalizeInitials(value: string) {
-  const cleaned = value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 3);
-  return (cleaned || "AAA").padEnd(3, "A");
-}
-
-function loadHighScores(): HighScoreEntry[] {
-  try {
-    const raw = localStorage.getItem(HIGH_SCORE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-
-    return parsed
-      .map((entry) => ({
-        initials: normalizeInitials(String(entry?.initials ?? "AAA")),
-        score: Number(entry?.score ?? 0),
-        level: Number(entry?.level ?? 1),
-        percent: Number(entry?.percent ?? 0),
-        date: String(entry?.date ?? ""),
-      }))
-      .filter((entry) => Number.isFinite(entry.score) && entry.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, HIGH_SCORE_LIMIT);
-  } catch {
-    return [];
-  }
-}
-
-function saveHighScores(scores: HighScoreEntry[]) {
-  localStorage.setItem(HIGH_SCORE_KEY, JSON.stringify(scores.slice(0, HIGH_SCORE_LIMIT)));
-}
-
-function qualifiesHighScore(scores: HighScoreEntry[], score: number) {
-  return score > 0 && (scores.length < HIGH_SCORE_LIMIT || score > scores[scores.length - 1].score);
-}
-
-function insertHighScore(scores: HighScoreEntry[], entry: HighScoreEntry) {
-  return [...scores, entry].sort((a, b) => b.score - a.score).slice(0, HIGH_SCORE_LIMIT);
-}
-
-function qixSpeedForLevel(level: number) {
-  return BASE_QIX_SPEED + Math.max(0, level - 1) * QIX_LEVEL_SPEED_STEP;
-}
-
 function resetQix(level: number) {
   const angle = Math.random() * Math.PI * 2;
-  const speed = qixSpeedForLevel(level);
+  // Make speed moderate but scaling
+  const speed = BASE_QIX_SPEED + level * 0.1;
   return {
-    x: COLS * 0.5 + (Math.random() - 0.5) * 8,
-    y: ROWS * 0.42 + (Math.random() - 0.5) * 8,
+    x: COLS * 0.5,
+    y: ROWS * 0.5,
     vx: Math.cos(angle) * speed,
     vy: Math.sin(angle) * speed,
     phase: Math.random() * Math.PI * 2,
   };
 }
 
-function createSparks(level: number) {
+function isBorderCell(x: number, y: number, claimed: boolean[][]) {
+  if (x < 0 || x >= COLS || y < 0 || y >= ROWS) return false;
+  if (!claimed[y][x]) return false;
+  
+  // Check all 8 neighbors (orthogonal and diagonal) to ensure corners connect!
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      if (dx === 0 && dy === 0) continue;
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && !claimed[ny][nx]) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function findNearestOpenCell(startX: number, startY: number, claimed: boolean[][]): Point {
+  const sx = clamp(Math.round(startX), 1, COLS - 2);
+  const sy = clamp(Math.round(startY), 1, ROWS - 2);
+  if (!claimed[sy][sx]) return { x: sx, y: sy };
+
+  const seen = Array.from({ length: ROWS }, () => Array(COLS).fill(false) as boolean[]);
+  const queue: Point[] = [{ x: sx, y: sy }];
+  seen[sy][sx] = true;
+  for (let i = 0; i < queue.length; i += 1) {
+    const p = queue[i];
+    for (const d of CARDINALS) {
+      const nx = p.x + d.x;
+      const ny = p.y + d.y;
+      if (nx <= 0 || ny <= 0 || nx >= COLS - 1 || ny >= ROWS - 1 || seen[ny][nx]) continue;
+      if (!claimed[ny][nx]) return { x: nx, y: ny };
+      seen[ny][nx] = true;
+      queue.push({ x: nx, y: ny });
+    }
+  }
+  return { x: Math.floor(COLS / 2), y: Math.floor(ROWS / 2) };
+}
+
+function buildBorderDistanceMap(claimed: boolean[][], target: Point) {
+  if (!isBorderCell(target.x, target.y, claimed)) return null;
+  const distances = Array.from({ length: ROWS }, () => Array(COLS).fill(Infinity) as number[]);
+  const queue: Point[] = [{ ...target }];
+  distances[target.y][target.x] = 0;
+
+  for (let i = 0; i < queue.length; i += 1) {
+    const p = queue[i];
+    for (const d of CARDINALS) {
+      const nx = p.x + d.x;
+      const ny = p.y + d.y;
+      if (!isBorderCell(nx, ny, claimed) || distances[ny][nx] !== Infinity) continue;
+      distances[ny][nx] = distances[p.y][p.x] + 1;
+      queue.push({ x: nx, y: ny });
+    }
+  }
+
+  return distances;
+}
+
+function createSparks(level: number): Spark[] {
   const count = Math.min(2 + Math.floor(level / 2), MAX_SPARKS);
-  const speed = BASE_SPARK_SPEED + level * 0.15;
-  const perimeter = perimeterLength();
-  const sparks = [];
+  const speed = BASE_SPARK_SPEED + level * 0.12;
+  const sparks: Spark[] = [];
+  
+  // Place sparks on valid border cells, not the dead corner pixels.
+  const spawnPoints = [
+    { x: Math.floor(COLS * 0.25), y: 0, dx: 1, dy: 0 },
+    { x: COLS - 1, y: Math.floor(ROWS * 0.3), dx: 0, dy: 1 },
+    { x: Math.floor(COLS * 0.75), y: ROWS - 1, dx: -1, dy: 0 },
+    { x: 0, y: Math.floor(ROWS * 0.7), dx: 0, dy: -1 },
+    { x: Math.floor(COLS / 2), y: 0, dx: 1, dy: 0 },
+    { x: Math.floor(COLS / 2), y: ROWS - 1, dx: -1, dy: 0 },
+  ];
+
   for (let i = 0; i < count; i++) {
-    const t = (perimeter / count) * i + Math.random() * 5;
-    const direction = i % 2 === 0 ? 1 : -1;
-    const pos = perimeterPoint(t);
-    const next = perimeterPoint(t + direction);
+    const pt = spawnPoints[i % spawnPoints.length];
     sparks.push({
-      x: pos.x,
-      y: pos.y,
-      dx: next.x - pos.x,
-      dy: next.y - pos.y,
+      x: pt.x,
+      y: pt.y,
+      dx: pt.dx,
+      dy: pt.dy,
       speed,
-      carry: Math.random(),
-      phase: t,
+      progress: 0,
+      perimeterIndex: i * 10,
     });
   }
   return sparks;
 }
 
-function createInitialGame(level = 1, score = 0, lives = START_LIVES) {
+function updateSpark(spark: Spark, claimed: boolean[][], distanceMap: number[][] | null): Spark {
+  let progress = spark.progress + spark.speed;
+  let sx = spark.x;
+  let sy = spark.y;
+  let dx = spark.dx;
+  let dy = spark.dy;
+
+  // Recover if our cell is no longer a valid border
+  if (!isBorderCell(sx, sy, claimed)) {
+    const fallback = findNearestBorderCell(sx, sy, claimed);
+    sx = fallback.x;
+    sy = fallback.y;
+    const firstValid = CARDINALS.find((d) => isBorderCell(sx + d.x, sy + d.y, claimed));
+    if (firstValid) {
+      dx = firstValid.x;
+      dy = firstValid.y;
+    }
+  }
+
+  while (progress >= 1) {
+    progress -= 1;
+
+    // Get all valid neighboring border cells
+    const neighbors = CARDINALS.map((d) => ({
+      d,
+      x: sx + d.x,
+      y: sy + d.y,
+    })).filter((n) => isBorderCell(n.x, n.y, claimed));
+
+    if (neighbors.length === 0) break;
+
+    // If chasing player, try to move toward them
+    const chasing = distanceMap && distanceMap[sy]?.[sx] !== Infinity;
+    if (chasing) {
+      const withDist = neighbors.map((n) => ({
+        ...n,
+        dist: distanceMap![n.y][n.x],
+      })).filter((n) => n.dist !== Infinity);
+
+      if (withDist.length > 0) {
+        withDist.sort((a, b) => a.dist - b.dist);
+        dx = withDist[0].d.x;
+        dy = withDist[0].d.y;
+        sx += dx;
+        sy += dy;
+        continue;
+      }
+    }
+
+    // Otherwise, pick a random valid direction (but avoid reversing when possible)
+    const opposite = { x: -dx, y: -dy };
+    const nonReverse = neighbors.filter((n) => n.d.x !== opposite.x || n.d.y !== opposite.y);
+    const pool = nonReverse.length > 0 ? nonReverse : neighbors;
+    const choice = pool[Math.floor(Math.random() * pool.length)];
+
+    dx = choice.d.x;
+    dy = choice.d.y;
+    sx = choice.x;
+    sy = choice.y;
+  }
+
+  return { ...spark, x: sx, y: sy, dx, dy, progress };
+}
+
+function findNearestBorderCell(startX: number, startY: number, claimed: boolean[][]): Point {
+  const sx = clamp(Math.round(startX), 0, COLS - 1);
+  const sy = clamp(Math.round(startY), 0, ROWS - 1);
+  if (isBorderCell(sx, sy, claimed)) return { x: sx, y: sy };
+
+  const seen = Array.from({ length: ROWS }, () => Array(COLS).fill(false) as boolean[]);
+  const queue: Point[] = [{ x: sx, y: sy }];
+  seen[sy][sx] = true;
+  for (let i = 0; i < queue.length; i += 1) {
+    const p = queue[i];
+    for (const d of CARDINALS) {
+      const nx = p.x + d.x;
+      const ny = p.y + d.y;
+      if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS || seen[ny][nx]) continue;
+      if (isBorderCell(nx, ny, claimed)) return { x: nx, y: ny };
+      seen[ny][nx] = true;
+      queue.push({ x: nx, y: ny });
+    }
+  }
+  return { x: Math.floor(COLS / 2), y: ROWS - 1 };
+}
+
+function createInitialGame(level = 1, carryOverScore = 0) {
   const claimed = createClaimed();
   return {
     claimed,
-    slowClaimed: createSlowClaimed(),
     player: { x: Math.floor(COLS / 2), y: ROWS - 1 },
     dir: { x: 0, y: 0 },
-    moveTick: 0,
-    slowMode: false,
     drawing: false,
-    slowTrail: true,
-    fuse: 0,
     trail: [] as Point[],
     trailSet: new Set<string>(),
     qix: resetQix(level),
     sparks: createSparks(level),
-    score,
+    score: carryOverScore,
     percent: areaPercent(claimed),
-    lives,
+    lives: START_LIVES,
     level,
     status: "ready" as GameStatus,
-    message: `Livello ${level} - Premi una freccia o WASD per iniziare`,
+    message: `Livello ${level} — Premi una freccia o WASD per iniziare`,
+    fuseIndex: 0,
+    fuseTimer: 0,
+    slowMode: false,
+    slowClaimed: new Set<string>(),
+    slowTick: 0,
+    spaceHeld: false,
   };
 }
 
-function expandedCells(cells: Point[], radius: number): Point[] {
-  const seen = new Set<string>();
-  const expanded: Point[] = [];
 
-  for (const cell of cells) {
-    for (let dy = -radius; dy <= radius; dy += 1) {
-      for (let dx = -radius; dx <= radius; dx += 1) {
-        if (Math.abs(dx) + Math.abs(dy) > radius) continue;
-        const x = cell.x + dx;
-        const y = cell.y + dy;
-        if (x < 0 || y < 0 || x >= COLS || y >= ROWS) continue;
-        const cellKey = key(x, y);
-        if (!seen.has(cellKey)) {
-          seen.add(cellKey);
-          expanded.push({ x, y });
-        }
-      }
-    }
-  }
-
-  return expanded;
-}
-
-function sweptGridCells(from: Point, to: Point): Point[] {
-  const steps = Math.max(1, Math.ceil(Math.max(Math.abs(to.x - from.x), Math.abs(to.y - from.y)) * 3));
-  const seen = new Set<string>();
-  const cells: Point[] = [];
-
-  for (let i = 0; i <= steps; i += 1) {
-    const ratio = i / steps;
-    const x = Math.round(from.x + (to.x - from.x) * ratio);
-    const y = Math.round(from.y + (to.y - from.y) * ratio);
-    const cellKey = key(x, y);
-    if (!seen.has(cellKey)) {
-      seen.add(cellKey);
-      cells.push({ x, y });
-    }
-  }
-
-  return cells;
-}
-
-function qixTrailTouchCells(from: Point, to: Point): Point[] {
-  return expandedCells(sweptGridCells(from, to), QIX_TRAIL_TOUCH_RADIUS);
-}
-
-function isInsideGrid(x: number, y: number) {
-  return x >= 0 && y >= 0 && x < COLS && y < ROWS;
-}
-
-function isInteriorCell(x: number, y: number) {
-  return x > 0 && y > 0 && x < COLS - 1 && y < ROWS - 1;
-}
-
-function isClaimedGridCell(grid: boolean[][], x: number, y: number) {
-  return isInsideGrid(x, y) && Boolean(grid[y]?.[x]);
-}
-
-function isSparkBoundaryCell(grid: boolean[][], x: number, y: number) {
-  if (!isClaimedGridCell(grid, x, y)) return false;
-  if (x === 0 || y === 0 || x === COLS - 1 || y === ROWS - 1) return true;
-  return CARDINALS.some((dir) => isInsideGrid(x + dir.x, y + dir.y) && !grid[y + dir.y]?.[x + dir.x]);
-}
-
-function isOuterBoundaryCell(x: number, y: number) {
-  return x === 0 || y === 0 || x === COLS - 1 || y === ROWS - 1;
-}
-
-function isInternalSparkBoundaryCell(grid: boolean[][], x: number, y: number) {
-  return isSparkBoundaryCell(grid, x, y) && !isOuterBoundaryCell(x, y);
-}
-
-function sparkBoundaryNeighbors(grid: boolean[][], x: number, y: number) {
-  return CARDINALS
-    .map((dir) => ({ x: x + dir.x, y: y + dir.y }))
-    .filter((cell) => isSparkBoundaryCell(grid, cell.x, cell.y));
-}
-
-function collectInternalSparkBoundaryCells(grid: boolean[][]) {
-  const cells: Point[] = [];
-  for (let y = 1; y < ROWS - 1; y += 1) {
-    for (let x = 1; x < COLS - 1; x += 1) {
-      if (isInternalSparkBoundaryCell(grid, x, y)) cells.push({ x, y });
-    }
-  }
-  return cells;
-}
-
-function nearestPoint(points: Point[], from: Point, offset = 0) {
-  if (points.length === 0) return undefined;
-  let bestIndex = 0;
-  let bestDistance = Number.POSITIVE_INFINITY;
-
-  for (let i = 0; i < points.length; i += 1) {
-    const distance = manhattan(points[i], from) + ((i + offset) % 7) * 0.001;
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      bestIndex = i;
-    }
-  }
-
-  return points[(bestIndex + offset) % points.length];
-}
-
-function nearestSparkBoundaryCell(grid: boolean[][], fromX: number, fromY: number): Point {
-  const startX = clamp(Math.round(fromX), 0, COLS - 1);
-  const startY = clamp(Math.round(fromY), 0, ROWS - 1);
-  const maxRadius = Math.max(COLS, ROWS);
-
-  for (let searchRadius = 0; searchRadius <= maxRadius; searchRadius += 1) {
-    for (let y = startY - searchRadius; y <= startY + searchRadius; y += 1) {
-      for (let x = startX - searchRadius; x <= startX + searchRadius; x += 1) {
-        if (
-          searchRadius > 0 &&
-          x !== startX - searchRadius &&
-          x !== startX + searchRadius &&
-          y !== startY - searchRadius &&
-          y !== startY + searchRadius
-        ) {
-          continue;
-        }
-        if (isSparkBoundaryCell(grid, x, y)) return { x, y };
-      }
-    }
-  }
-
-  return { x: 0, y: ROWS - 1 };
-}
-
-function manhattan(a: Point, b: Point) {
-  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
-}
-
-function isReverseSparkMove(spark: Game["sparks"][number], current: Point, candidate: Point) {
-  if (spark.dx === 0 && spark.dy === 0) return false;
-  return candidate.x - current.x === -spark.dx && candidate.y - current.y === -spark.dy;
-}
-
-function moveSparkOnce(game: Game, spark: Game["sparks"][number]) {
-  const current = isSparkBoundaryCell(game.claimed, spark.x, spark.y)
-    ? { x: spark.x, y: spark.y }
-    : nearestSparkBoundaryCell(game.claimed, spark.x, spark.y);
-  const neighbors = sparkBoundaryNeighbors(game.claimed, current.x, current.y);
-
-  if (neighbors.length === 0) {
-    return { ...spark, ...current, dx: 0, dy: 0, phase: spark.phase + 0.35 };
-  }
-
-  const canChase = !game.drawing && isSparkBoundaryCell(game.claimed, game.player.x, game.player.y);
-  const internalTarget = nearestPoint(collectInternalSparkBoundaryCells(game.claimed), current);
-  const choices =
-    neighbors.length > 1 ? neighbors.filter((candidate) => !isReverseSparkMove(spark, current, candidate)) : neighbors;
-  let best = neighbors[0];
-  let bestScore = Number.NEGATIVE_INFINITY;
-
-  for (const candidate of choices.length > 0 ? choices : neighbors) {
-    const dx = candidate.x - current.x;
-    const dy = candidate.y - current.y;
-    const continues = dx === spark.dx && dy === spark.dy ? 2 : 0;
-    const chase = canChase ? -manhattan(candidate, game.player) * 0.45 : 0;
-    const internal = isInternalSparkBoundaryCell(game.claimed, candidate.x, candidate.y) ? 1.8 : 0;
-    const internalPull = internalTarget ? -manhattan(candidate, internalTarget) * 0.08 : 0;
-    const cornerTurn = continues === 0 ? 0.35 : 0;
-    const score = continues + cornerTurn + chase + internal + internalPull + Math.random() * 0.08;
-
-    if (score > bestScore) {
-      bestScore = score;
-      best = candidate;
-    }
-  }
-
-  return {
-    ...spark,
-    x: best.x,
-    y: best.y,
-    dx: best.x - current.x,
-    dy: best.y - current.y,
-    phase: spark.phase + 0.45,
-  };
-}
-
-function moveSpark(game: Game, spark: Game["sparks"][number]) {
-  let moved = spark;
-  let carry = spark.carry + spark.speed;
-  const steps = Math.max(1, Math.floor(carry));
-  carry -= steps;
-  const cells: Point[] = [{ x: spark.x, y: spark.y }];
-
-  for (let i = 0; i < steps; i += 1) {
-    moved = moveSparkOnce(game, moved);
-    cells.push({ x: moved.x, y: moved.y });
-  }
-
-  return { spark: { ...moved, carry }, cells };
-}
-
-function isClaimedAt(game: Game, x: number, y: number) {
-  const cx = Math.round(x);
-  const cy = Math.round(y);
-  return !isInteriorCell(cx, cy) || Boolean(game.claimed[cy]?.[cx]);
-}
-
-function isQixBlockedAt(game: Game, x: number, y: number) {
-  const cx = Math.round(x);
-  const cy = Math.round(y);
-
-  for (let dy = -QIX_BODY_RADIUS; dy <= QIX_BODY_RADIUS; dy += 1) {
-    for (let dx = -QIX_BODY_RADIUS; dx <= QIX_BODY_RADIUS; dx += 1) {
-      if (Math.abs(dx) + Math.abs(dy) > QIX_BODY_RADIUS) continue;
-      if (isClaimedAt(game, cx + dx, cy + dy)) return true;
-    }
-  }
-
-  return false;
-}
-
-function isClearInGrid(grid: boolean[][], trailSet: Set<string>, x: number, y: number, radius: number) {
-  for (let dy = -radius; dy <= radius; dy += 1) {
-    for (let dx = -radius; dx <= radius; dx += 1) {
-      if (Math.abs(dx) + Math.abs(dy) > radius) continue;
-      const cx = x + dx;
-      const cy = y + dy;
-      if (!isInteriorCell(cx, cy) || grid[cy]?.[cx] || trailSet.has(key(cx, cy))) return false;
-    }
-  }
-
-  return true;
-}
-
-function nearestOpenCellInGrid(grid: boolean[][], trailSet: Set<string>, fromX: number, fromY: number, radius = 0): Point {
-  const startX = clamp(Math.round(fromX), 1, COLS - 2);
-  const startY = clamp(Math.round(fromY), 1, ROWS - 2);
-  const maxRadius = Math.max(COLS, ROWS);
-
-  for (let searchRadius = 0; searchRadius <= maxRadius; searchRadius += 1) {
-    for (let y = startY - searchRadius; y <= startY + searchRadius; y += 1) {
-      for (let x = startX - searchRadius; x <= startX + searchRadius; x += 1) {
-        if (
-          searchRadius > 0 &&
-          x !== startX - searchRadius &&
-          x !== startX + searchRadius &&
-          y !== startY - searchRadius &&
-          y !== startY + searchRadius
-        ) {
-          continue;
-        }
-        if (!isInteriorCell(x, y)) continue;
-        if (isClearInGrid(grid, trailSet, x, y, radius)) return { x, y };
-      }
-    }
-  }
-
-  if (radius > 0) return nearestOpenCellInGrid(grid, trailSet, fromX, fromY, 0);
-
-  return { x: Math.floor(COLS / 2), y: Math.floor(ROWS / 2) };
-}
-
-function nearestOpenCell(game: Game, fromX: number, fromY: number): Point {
-  return nearestOpenCellInGrid(game.claimed, game.trailSet, fromX, fromY, QIX_BODY_RADIUS);
-}
-
-function normalizeQixVelocity(qix: Game["qix"], speed: number) {
-  const mag = Math.hypot(qix.vx, qix.vy);
-  if (mag <= 0.0001) {
-    const angle = Math.random() * Math.PI * 2;
-    qix.vx = Math.cos(angle) * speed;
-    qix.vy = Math.sin(angle) * speed;
-    return;
-  }
-
-  qix.vx = (qix.vx / mag) * speed;
-  qix.vy = (qix.vy / mag) * speed;
-}
-
-function scoreQixDirection(game: Game, x: number, y: number, vx: number, vy: number) {
-  const mag = Math.hypot(vx, vy);
-  if (mag <= 0.0001) return 0;
-
-  const stepX = vx / mag;
-  const stepY = vy / mag;
-  let score = 0;
-
-  for (let distance = 0.5; distance <= QIX_LOOKAHEAD; distance += 0.5) {
-    if (isQixBlockedAt(game, x + stepX * distance, y + stepY * distance)) break;
-    score = distance;
-  }
-
-  return score;
-}
-
-function steerQixTowardOpenSpace(game: Game, qix: Game["qix"], speed: number) {
-  let bestAngle = Math.atan2(qix.vy, qix.vx);
-  let bestScore = -1;
-  const currentAngle = Math.atan2(qix.vy, qix.vx);
-
-  for (let i = 0; i < 32; i += 1) {
-    const angle = (Math.PI * 2 * i) / 32;
-    const vx = Math.cos(angle) * speed;
-    const vy = Math.sin(angle) * speed;
-    const continuity = (Math.cos(angle - currentAngle) + 1) * 0.08;
-    const score = scoreQixDirection(game, qix.x, qix.y, vx, vy) + continuity;
-
-    if (score > bestScore) {
-      bestScore = score;
-      bestAngle = angle;
-    }
-  }
-
-  qix.vx = Math.cos(bestAngle) * speed;
-  qix.vy = Math.sin(bestAngle) * speed;
-}
-
-function moveQix(game: Game) {
-  const speed = qixSpeedForLevel(game.level);
-  const qix = { ...game.qix, phase: game.qix.phase + 0.18 };
-
-  if (isQixBlockedAt(game, qix.x, qix.y)) {
-    const open = nearestOpenCell(game, qix.x, qix.y);
-    qix.x = open.x;
-    qix.y = open.y;
-    steerQixTowardOpenSpace(game, qix, speed);
-  }
-
-  normalizeQixVelocity(qix, speed);
-  if (scoreQixDirection(game, qix.x, qix.y, qix.vx, qix.vy) < 1.5) {
-    steerQixTowardOpenSpace(game, qix, speed);
-  }
-
-  const subSteps = Math.max(4, Math.ceil(speed * 5));
-  let movedDistance = 0;
-
-  for (let step = 0; step < subSteps; step += 1) {
-    const dx = qix.vx / subSteps;
-    const dy = qix.vy / subSteps;
-    const nextX = qix.x + dx;
-    let blockedX = false;
-    let blockedY = false;
-
-    if (isQixBlockedAt(game, nextX, qix.y)) {
-      qix.vx = -qix.vx;
-      blockedX = true;
-    } else {
-      qix.x = nextX;
-      movedDistance += Math.abs(dx);
-    }
-
-    const nextY = qix.y + dy;
-    if (isQixBlockedAt(game, qix.x, nextY)) {
-      qix.vy = -qix.vy;
-      blockedY = true;
-    } else {
-      qix.y = nextY;
-      movedDistance += Math.abs(dy);
-    }
-
-    if ((blockedX && blockedY) || ((blockedX || blockedY) && scoreQixDirection(game, qix.x, qix.y, qix.vx, qix.vy) < 1)) {
-      steerQixTowardOpenSpace(game, qix, speed);
-    }
-  }
-
-  if (isQixBlockedAt(game, qix.x, qix.y)) {
-    const open = nearestOpenCell(game, qix.x, qix.y);
-    qix.x = open.x;
-    qix.y = open.y;
-    steerQixTowardOpenSpace(game, qix, speed);
-  } else if (movedDistance < speed * 0.35) {
-    steerQixTowardOpenSpace(game, qix, speed);
-  }
-
-  qix.x = clamp(qix.x, 1, COLS - 2);
-  qix.y = clamp(qix.y, 1, ROWS - 2);
-  normalizeQixVelocity(qix, speed);
-
-  return qix;
-}
 
 function loseLife(game: Game, text: string): Game {
   const lives = game.lives - 1;
+  // Spawn explosion at player position
+  spawnExplosion(game.player.x * CELL + CELL / 2, game.player.y * CELL + CELL / 2, "#00ffff", 30);
+  spawnExplosion(game.player.x * CELL + CELL / 2, game.player.y * CELL + CELL / 2, "#ffff00", 15);
+  
+  if (lives <= 0) {
+    return {
+      ...game,
+      player: { x: Math.floor(COLS / 2), y: ROWS - 1 },
+      dir: { x: 0, y: 0 },
+      drawing: false,
+      trail: [],
+      trailSet: new Set<string>(),
+      qix: resetQix(game.level),
+      sparks: createSparks(game.level),
+      lives: 0,
+      status: "enterName",
+      message: "GAME OVER — Inserisci le tue iniziali",
+      fuseIndex: 0,
+      fuseTimer: 0,
+      slowMode: false,
+      slowClaimed: new Set<string>(),
+      slowTick: 0,
+      spaceHeld: false,
+    };
+  }
+  
   return {
     ...game,
     player: { x: Math.floor(COLS / 2), y: ROWS - 1 },
     dir: { x: 0, y: 0 },
-    slowMode: false,
     drawing: false,
-    slowTrail: true,
-    fuse: 0,
     trail: [],
     trailSet: new Set<string>(),
     qix: resetQix(game.level),
+    sparks: createSparks(game.level),
     lives,
-    status: lives <= 0 ? "lost" : "paused",
-    message: lives <= 0 ? "Game over. Premi R per ripartire" : `${text} Premi spazio per continuare`,
+    status: "paused",
+    message: `${text} Premi P per pausa / SPAZIO per slow mode`,
+    fuseIndex: 0,
+    fuseTimer: 0,
+    slowMode: false,
+    slowClaimed: game.slowClaimed,
+    slowTick: 0,
+    spaceHeld: false,
   };
 }
 
 function claimClosedArea(game: Game): Game {
   const claimed = copyClaimed(game.claimed);
-  const slowClaimed = copyClaimed(game.slowClaimed);
   for (const p of game.trail) claimed[p.y][p.x] = true;
-  if (game.slowTrail) {
-    for (const p of game.trail) slowClaimed[p.y][p.x] = true;
-  }
 
-  const qx = clamp(Math.round(game.qix.x), 1, COLS - 2);
-  const qy = clamp(Math.round(game.qix.y), 1, ROWS - 2);
-  const qixAnchor = claimed[qy][qx] ? nearestOpenCellInGrid(claimed, new Set<string>(), qx, qy) : { x: qx, y: qy };
+  const qixOpenCell = findNearestOpenCell(game.qix.x, game.qix.y, claimed);
+  const qx = qixOpenCell.x;
+  const qy = qixOpenCell.y;
   const seen = Array.from({ length: ROWS }, () => Array(COLS).fill(false) as boolean[]);
   const queue: Point[] = [];
-  if (!claimed[qixAnchor.y][qixAnchor.x]) {
-    seen[qixAnchor.y][qixAnchor.x] = true;
-    queue.push(qixAnchor);
+  if (!claimed[qy][qx]) {
+    seen[qy][qx] = true;
+    queue.push({ x: qx, y: qy });
   }
 
   // The enemy marks the unsafe region; every other enclosed cell becomes territory.
@@ -656,1038 +413,1209 @@ function claimClosedArea(game: Game): Game {
   }
 
   let gained = 0;
-  const gainedSet = new Set<string>();
   for (let y = 1; y < ROWS - 1; y += 1) {
     for (let x = 1; x < COLS - 1; x += 1) {
       if (!claimed[y][x] && !seen[y][x]) {
         claimed[y][x] = true;
-        if (game.slowTrail) slowClaimed[y][x] = true;
-        gainedSet.add(key(x, y));
         gained += 1;
       }
     }
   }
 
+  const destroyedSparks = game.sparks.filter((spark) => !isBorderCell(spark.x, spark.y, claimed));
+  const survivingSparks = game.sparks.filter((spark) => isBorderCell(spark.x, spark.y, claimed));
+  for (const spark of destroyedSparks) {
+    spawnExplosion(spark.x * CELL + CELL / 2, spark.y * CELL + CELL / 2, "#ff8c00", 26);
+    spawnExplosion(spark.x * CELL + CELL / 2, spark.y * CELL + CELL / 2, "#ffff00", 14);
+  }
+
   const percent = areaPercent(claimed);
-  const isCapturedSpark = (spark: Game["sparks"][number]) => {
-    if (!isSparkBoundaryCell(claimed, spark.x, spark.y)) return true;
-    return CARDINALS.some((dir) => gainedSet.has(key(spark.x + dir.x, spark.y + dir.y)));
-  };
-  const survivingSparks = game.sparks.filter((spark) => !isCapturedSpark(spark));
-  const destroyedSparks = game.sparks.length - survivingSparks.length;
-  const drawScore = (gained * 12 + game.trail.length * 5) * (game.slowTrail ? SLOW_DRAW_MULTIPLIER : 1);
-  const score = game.score + drawScore + destroyedSparks * SPARK_CAPTURE_BONUS * game.level;
+  const sparkBonus = destroyedSparks.length * (2500 + game.level * 500);
+  const areaPoints = gained * 12 + game.trail.length * 5;
+  const score = game.score + (game.slowMode ? areaPoints * 2 : areaPoints) + sparkBonus;
+  
+  // Track slow-claimed cells
+  const newSlowClaimed = new Set(game.slowClaimed);
+  if (game.slowMode) {
+    for (let y = 1; y < ROWS - 1; y += 1) {
+      for (let x = 1; x < COLS - 1; x += 1) {
+        if (!game.claimed[y][x] && claimed[y][x]) {
+          newSlowClaimed.add(key(x, y));
+        }
+      }
+    }
+  }
+  const won = percent >= TARGET_PERCENT;
+
+  // Celebration fireworks on level win
+  if (won) {
+    const colors = ["#00ff41", "#ffff00", "#00ffff", "#ff00ff", "#ff8c00"];
+    for (let i = 0; i < 8; i++) {
+      setTimeout(() => {
+        spawnExplosion(
+          Math.random() * COLS * CELL,
+          Math.random() * ROWS * CELL,
+          colors[i % colors.length],
+          20
+        );
+      }, i * 80);
+    }
+  }
+
   return {
     ...game,
     claimed,
-    slowClaimed,
-    sparks: survivingSparks,
     trail: [],
     trailSet: new Set<string>(),
+    sparks: survivingSparks,
     drawing: false,
-    slowTrail: true,
-    fuse: 0,
     percent,
     score,
-    status: percent >= TARGET_PERCENT ? "won" : game.status,
-    message: percent >= TARGET_PERCENT
-      ? `Livello ${game.level} completato! Premi N per continuare`
-      : destroyedSparks > 0
-        ? `${destroyedSparks} Sparx catturato${destroyedSparks > 1 ? "i" : ""}! Bonus ${destroyedSparks * SPARK_CAPTURE_BONUS * game.level}`
-        : "",
+    slowMode: false,
+    slowClaimed: newSlowClaimed,
+    slowTick: 0,
+    spaceHeld: game.spaceHeld,
+    status: won ? "won" : game.status,
+    message: won ? "Livello Completato" : "",
   };
-}
-
-function resolveSparkCollisions(game: Game, sparkSweeps: Point[][]): Game | null {
-  for (const sweptCells of sparkSweeps) {
-    if (sweptCells.some((cell) => cell.x === game.player.x && cell.y === game.player.y)) {
-      return loseLife(game, game.drawing ? "Uno Sparx ha colpito la penna." : "Uno Sparx ti ha raggiunto sul bordo.");
-    }
-
-    if (game.drawing) {
-      const dangerCells = expandedCells(sweptCells, SPARK_TRAIL_TOUCH_RADIUS);
-      for (const cell of dangerCells) {
-        if (game.trailSet.has(key(cell.x, cell.y))) {
-          return loseLife(game, "Uno Sparx ha colpito la tua scia.");
-        }
-      }
-    }
-  }
-
-  return null;
-}
-
-function samePoint(a: Point, b: Point) {
-  return a.x === b.x && a.y === b.y;
-}
-
-function addPoint(a: Point, b: Point) {
-  return { x: a.x + b.x, y: a.y + b.y };
-}
-
-function oppositeDir(dir: Point) {
-  return { x: -dir.x, y: -dir.y };
-}
-
-function perpendicularDirs(dir: Point) {
-  return dir.x !== 0 ? [{ x: 0, y: 1 }, { x: 0, y: -1 }] : [{ x: 1, y: 0 }, { x: -1, y: 0 }];
-}
-
-function pointKey(point: Point) {
-  return key(point.x, point.y);
-}
-
-function qixDistance(game: Game, point: Point) {
-  return Math.hypot(point.x - game.qix.x, point.y - game.qix.y);
-}
-
-function sparkDistance(game: Game, point: Point) {
-  if (game.sparks.length === 0) return Number.POSITIVE_INFINITY;
-  return Math.min(...game.sparks.map((spark) => manhattan(spark, point)));
-}
-
-function isAutoplayDangerous(game: Game, point: Point, drawing: boolean) {
-  if (qixDistance(game, point) < AUTOPLAY_QIX_DANGER) return true;
-  return drawing && sparkDistance(game, point) < AUTOPLAY_SPARK_DANGER;
-}
-
-function isAutoplayMoveLegal(game: Game, dir: Point) {
-  if (dir.x === 0 && dir.y === 0) return false;
-  const target = {
-    x: clamp(game.player.x + dir.x, 0, COLS - 1),
-    y: clamp(game.player.y + dir.y, 0, ROWS - 1),
-  };
-  if (samePoint(target, game.player)) return false;
-
-  const targetClaimed = game.claimed[target.y]?.[target.x];
-  const targetTrail = game.trailSet.has(pointKey(target));
-  if (game.drawing) return !targetTrail || Boolean(targetClaimed);
-  return Boolean(targetClaimed) || isInteriorCell(target.x, target.y);
-}
-
-function scoreAutoplayPoint(game: Game, point: Point, drawing: boolean) {
-  const qix = qixDistance(game, point);
-  const spark = sparkDistance(game, point);
-  const dangerPenalty = isAutoplayDangerous(game, point, drawing) ? 120 : 0;
-  return qix * 2.2 + Math.min(spark, 24) * 1.5 - dangerPenalty;
-}
-
-function findAutoplayClosingRoute(game: Game) {
-  const queue: Array<{ point: Point; route: Point[]; trailSet: Set<string> }> = [
-    { point: game.player, route: [], trailSet: new Set(game.trailSet) },
-  ];
-  const seen = new Set<string>([pointKey(game.player)]);
-  let bestRoute: Point[] = [];
-  let bestScore = Number.NEGATIVE_INFINITY;
-
-  for (let i = 0; i < queue.length; i += 1) {
-    const node = queue[i];
-    if (node.route.length >= AUTOPLAY_MAX_ROUTE) continue;
-
-    for (const dir of CARDINALS) {
-      const target = addPoint(node.point, dir);
-      if (!isInsideGrid(target.x, target.y)) continue;
-      const targetClaimed = Boolean(game.claimed[target.y]?.[target.x]);
-      const targetKey = pointKey(target);
-      if (!targetClaimed && (!isInteriorCell(target.x, target.y) || node.trailSet.has(targetKey))) continue;
-
-      const route = [...node.route, dir];
-      if (targetClaimed) {
-        if (sparkDistance(game, target) < AUTOPLAY_SPARK_DANGER) continue;
-        if (route.length > 1) return route;
-        continue;
-      }
-
-      if (isAutoplayDangerous(game, target, true)) continue;
-      const seenKey = `${targetKey}:${route.length}`;
-      if (seen.has(seenKey)) continue;
-      seen.add(seenKey);
-
-      const nextTrailSet = new Set(node.trailSet);
-      nextTrailSet.add(targetKey);
-      const routeScore = scoreAutoplayPoint(game, target, true) - route.length * 0.7;
-      if (routeScore > bestScore) {
-        bestScore = routeScore;
-        bestRoute = route;
-      }
-      queue.push({ point: target, route, trailSet: nextTrailSet });
-    }
-  }
-
-  return bestRoute;
-}
-
-function simulateAutoplayClaimRoute(game: Game, entryDir: Point, sideDir: Point, depth: number, lateral: number) {
-  const route: Point[] = [];
-  const trailSet = new Set<string>();
-  let point = game.player;
-  let drawing = false;
-  let minSafety = Number.POSITIVE_INFINITY;
-
-  const tryStep = (dir: Point) => {
-    const target = addPoint(point, dir);
-    if (!isInsideGrid(target.x, target.y)) return false;
-    const targetClaimed = Boolean(game.claimed[target.y]?.[target.x]);
-    const targetKey = pointKey(target);
-    if (!targetClaimed && (!isInteriorCell(target.x, target.y) || trailSet.has(targetKey))) return false;
-    if (!targetClaimed && isAutoplayDangerous(game, target, true)) return false;
-
-    route.push(dir);
-    point = target;
-    if (!targetClaimed) {
-      drawing = true;
-      trailSet.add(targetKey);
-      minSafety = Math.min(minSafety, scoreAutoplayPoint(game, target, true));
-      return true;
-    }
-
-    if (sparkDistance(game, target) < AUTOPLAY_SPARK_DANGER) return false;
-    return drawing && route.length > 3;
-  };
-
-  for (let i = 0; i < depth; i += 1) {
-    if (tryStep(entryDir) && game.claimed[point.y]?.[point.x]) return { route, minSafety };
-  }
-
-  for (let i = 0; i < lateral; i += 1) {
-    if (tryStep(sideDir) && game.claimed[point.y]?.[point.x]) return { route, minSafety };
-  }
-
-  const backDir = oppositeDir(entryDir);
-  for (let i = 0; i < depth + 8; i += 1) {
-    if (!tryStep(backDir)) return null;
-    if (game.claimed[point.y]?.[point.x]) return { route, minSafety };
-  }
-
-  return null;
-}
-
-function buildAutoplayClaimRoute(game: Game) {
-  let bestRoute: Point[] = [];
-  let bestScore = Number.NEGATIVE_INFINITY;
-  const maxDepth = game.percent < 25 ? 10 : 16;
-  const maxLateral = game.percent < 25 ? 14 : 24;
-  const step = game.percent < 25 ? 2 : 4;
-
-  for (const entryDir of CARDINALS) {
-    const entry = addPoint(game.player, entryDir);
-    if (!isInteriorCell(entry.x, entry.y) || game.claimed[entry.y]?.[entry.x]) continue;
-    if (isAutoplayDangerous(game, entry, true)) continue;
-
-    for (const sideDir of perpendicularDirs(entryDir)) {
-      for (let depth = 4; depth <= maxDepth; depth += step) {
-        for (let lateral = 4; lateral <= maxLateral; lateral += step) {
-          const candidate = simulateAutoplayClaimRoute(game, entryDir, sideDir, depth, lateral);
-          if (!candidate) continue;
-          const projectedArea = depth * lateral;
-          const score = projectedArea * 0.18 + candidate.minSafety - candidate.route.length * 0.35 + Math.random() * 4;
-          if (score > bestScore) {
-            bestScore = score;
-            bestRoute = candidate.route;
-          }
-        }
-      }
-    }
-  }
-
-  return bestRoute;
-}
-
-function chooseAutoplayBoundaryDir(game: Game) {
-  let bestDir = ZERO_DIR;
-  let bestScore = Number.NEGATIVE_INFINITY;
-
-  for (const dir of CARDINALS) {
-    if (!isAutoplayMoveLegal(game, dir)) continue;
-    const target = addPoint(game.player, dir);
-    if (!game.claimed[target.y]?.[target.x]) continue;
-    const openNeighbors = CARDINALS.filter((nextDir) => {
-      const next = addPoint(target, nextDir);
-      return isInteriorCell(next.x, next.y) && !game.claimed[next.y]?.[next.x];
-    }).length;
-    const continuity = dir.x === game.dir.x && dir.y === game.dir.y ? 4 : 0;
-    const internal = isInternalSparkBoundaryCell(game.claimed, target.x, target.y) ? 4 : 0;
-    const score = scoreAutoplayPoint(game, target, false) + openNeighbors * 3 + continuity + internal + Math.random();
-    if (score > bestScore) {
-      bestScore = score;
-      bestDir = dir;
-    }
-  }
-
-  return bestDir;
-}
-
-function chooseFallbackAutoplayDir(game: Game) {
-  let bestDir = ZERO_DIR;
-  let bestScore = Number.NEGATIVE_INFINITY;
-
-  for (const dir of CARDINALS) {
-    if (!isAutoplayMoveLegal(game, dir)) continue;
-    const target = addPoint(game.player, dir);
-    const closes = game.drawing && Boolean(game.claimed[target.y]?.[target.x]) ? 18 : 0;
-    const score = scoreAutoplayPoint(game, target, game.drawing) + closes + Math.random();
-    if (score > bestScore) {
-      bestScore = score;
-      bestDir = dir;
-    }
-  }
-
-  return bestDir;
-}
-
-function chooseAutoplayDir(game: Game, pilot: AutoPilotState) {
-  const playerKey = pointKey(game.player);
-  pilot.stuckTicks = playerKey === pilot.lastPlayerKey ? pilot.stuckTicks + 1 : 0;
-  pilot.lastPlayerKey = playerKey;
-  if (pilot.stuckTicks > 8) pilot.route = [];
-
-  const nextRouteDir = pilot.route[0];
-  if (nextRouteDir && isAutoplayMoveLegal(game, nextRouteDir)) {
-    pilot.route = pilot.route.slice(1);
-    return nextRouteDir;
-  }
-
-  pilot.route = [];
-  if (game.drawing) {
-    pilot.route = findAutoplayClosingRoute(game);
-    const closingDir = pilot.route.shift();
-    return closingDir ?? chooseFallbackAutoplayDir(game);
-  }
-
-  if (Math.random() < 0.24 || game.percent < 10) {
-    pilot.route = buildAutoplayClaimRoute(game);
-    const claimDir = pilot.route.shift();
-    if (claimDir) return claimDir;
-  }
-
-  return chooseAutoplayBoundaryDir(game);
-}
-
-function applyAutoplay(game: Game, pilot: AutoPilotState) {
-  if (!pilot.enabled) return game;
-
-  if (game.status === "won" || game.status === "lost") {
-    pilot.route = [];
-    pilot.endTicks += 1;
-    if (pilot.endTicks < AUTOPLAY_SETTLE_TICKS) return { ...game, dir: ZERO_DIR };
-    const nextLevel = game.status === "won" ? game.level + 1 : 1;
-    const nextScore = game.status === "won" ? game.score : 0;
-    const nextLives = game.status === "won" ? game.lives : START_LIVES;
-    return { ...createInitialGame(nextLevel, nextScore, nextLives), status: "playing", message: "" };
-  }
-
-  pilot.endTicks = 0;
-  const runningGame = game.status === "playing" ? game : { ...game, status: "playing" as GameStatus, message: "" };
-  const dir = chooseAutoplayDir(runningGame, pilot);
-  const target = addPoint(runningGame.player, dir);
-  const startingTrail =
-    !runningGame.drawing && isInsideGrid(target.x, target.y) && !runningGame.claimed[target.y]?.[target.x];
-  const slowMode = runningGame.drawing ? runningGame.slowTrail : startingTrail && Math.random() < 0.45;
-  return { ...runningGame, dir, slowMode };
-}
-
-function drawSpark(ctx: CanvasRenderingContext2D, pos: Point, phase: number) {
-  const jitter = Math.sin(phase * 1.7) * 1.3;
-
-  ctx.save();
-  ctx.translate(pos.x * CELL + CELL / 2, pos.y * CELL + CELL / 2);
-  ctx.rotate(phase * 0.45);
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.shadowColor = "#fb923c";
-  ctx.shadowBlur = 18;
-
-  ctx.strokeStyle = "#fed7aa";
-  ctx.lineWidth = 2.2;
-  ctx.beginPath();
-  ctx.moveTo(-CELL * 0.78, jitter);
-  ctx.lineTo(-CELL * 0.24, -CELL * 0.34);
-  ctx.lineTo(CELL * 0.12, CELL * 0.24);
-  ctx.lineTo(CELL * 0.72, -jitter);
-  ctx.stroke();
-
-  ctx.strokeStyle = "#f97316";
-  ctx.lineWidth = 1.4;
-  ctx.beginPath();
-  ctx.moveTo(-CELL * 0.1, -CELL * 0.72);
-  ctx.lineTo(CELL * 0.12, -CELL * 0.16);
-  ctx.lineTo(-CELL * 0.06, CELL * 0.68);
-  ctx.stroke();
-
-  ctx.fillStyle = "#fff7ed";
-  ctx.beginPath();
-  ctx.arc(0, 0, CELL * 0.18, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
 }
 
 function stepGame(game: Game): Game {
   if (game.status !== "playing") return game;
 
-  const previousQixPoint = { x: game.qix.x, y: game.qix.y };
-  const nextQix = moveQix(game);
+  const nextQix = { ...game.qix, phase: game.qix.phase + 0.18 };
+  const currentQixCell = { x: Math.round(nextQix.x), y: Math.round(nextQix.y) };
+  if (game.claimed[currentQixCell.y]?.[currentQixCell.x]) {
+    const open = findNearestOpenCell(nextQix.x, nextQix.y, game.claimed);
+    nextQix.x = open.x;
+    nextQix.y = open.y;
+  }
 
-  const movedSparkResults = game.sparks.map((spark) => moveSpark(game, spark));
-  const movedSparks = movedSparkResults.map((result) => result.spark);
-  const sparkSweeps = movedSparkResults.map((result) => result.cells);
+  // ── STRICT QIX MOVEMENT ──
+  // Make multiple small steps to ensure QIX never enters claimed territory
+  const speed = BASE_QIX_SPEED + game.level * 0.1;
+  const steps = 5;
+  let qixHitTrailDuringMove = false;
+  for (let s = 0; s < steps; s++) {
+    const nx = nextQix.x + (nextQix.vx / steps);
+    const ny = nextQix.y + (nextQix.vy / steps);
+    
+    const cx = Math.round(nx);
+    const cy = Math.round(ny);
+
+    if (game.trail.some((pt) => Math.hypot(nx - pt.x, ny - pt.y) < 1.35)) {
+      qixHitTrailDuringMove = true;
+      nextQix.x = nx;
+      nextQix.y = ny;
+      break;
+    }
+
+    // Bounds check
+    const isOutOfBounds = cx <= 0 || cx >= COLS - 1 || cy <= 0 || cy >= ROWS - 1;
+    // Claimed territory check
+    const isClaimed = isOutOfBounds || game.claimed[cy]?.[cx] === true;
+
+    if (isClaimed) {
+      // Collision! Invert velocity components
+      const claimX = game.claimed[Math.round(nextQix.y)]?.[cx] || cx <= 0 || cx >= COLS - 1;
+      const claimY = game.claimed[cy]?.[Math.round(nextQix.x)] || cy <= 0 || cy >= ROWS - 1;
+
+      if (claimX) nextQix.vx = -nextQix.vx;
+      if (claimY) nextQix.vy = -nextQix.vy;
+      
+      // Add randomness to prevent getting trapped
+      nextQix.vx += (Math.random() - 0.5) * 0.25;
+      nextQix.vy += (Math.random() - 0.5) * 0.25;
+
+      // Normalize speed
+      const mag = Math.sqrt(nextQix.vx * nextQix.vx + nextQix.vy * nextQix.vy);
+      if (mag > 0) {
+        nextQix.vx = (nextQix.vx / mag) * speed;
+        nextQix.vy = (nextQix.vy / mag) * speed;
+      }
+      break; // Re-evaluate on next frame
+    } else {
+      nextQix.x = nx;
+      nextQix.y = ny;
+    }
+  }
+
+  // ── UPDATE SPARKS ──
+  const sparkTarget = !game.drawing && isBorderCell(game.player.x, game.player.y, game.claimed) ? game.player : null;
+  const distanceMap = sparkTarget ? buildBorderDistanceMap(game.claimed, sparkTarget) : null;
+  const updatedSparks = game.sparks.map((spark) => updateSpark(spark, game.claimed, distanceMap));
+
   let updated: Game = {
     ...game,
-    moveTick: game.moveTick + 1,
     qix: nextQix,
-    sparks: movedSparks,
+    sparks: updatedSparks,
   };
 
-  const qixCell = { x: Math.round(nextQix.x), y: Math.round(nextQix.y) };
-  if (qixTrailTouchCells(previousQixPoint, nextQix).some((cell) => updated.trailSet.has(key(cell.x, cell.y)))) {
+  // ── CHECK TRAIL COLLISIONS ──
+  // Check if QIX overlaps with any cell in the trail (distance-based collision)
+  const qixHitTrail = qixHitTrailDuringMove || game.trail.some((pt) => {
+    const dx = nextQix.x - pt.x;
+    const dy = nextQix.y - pt.y;
+    return Math.sqrt(dx * dx + dy * dy) < 1.95;
+  });
+
+  if (qixHitTrail) {
     return loseLife(updated, "Il QIX ha tagliato la tua scia.");
   }
 
   const dir = updated.dir;
-  const playerCanMove = !updated.slowMode || updated.moveTick % 2 === 0;
-  if (updated.drawing && (dir.x === 0 && dir.y === 0)) {
-    const fuse = updated.fuse + FUSE_SPEED;
-    if (fuse >= Math.max(1, updated.trail.length)) return loseLife(updated, "La miccia ha raggiunto la tua penna.");
-    updated = { ...updated, fuse };
-  } else if (updated.fuse !== 0) {
-    updated = { ...updated, fuse: 0 };
-  }
 
-  if ((dir.x !== 0 || dir.y !== 0) && playerCanMove) {
-    const player = updated.player;
-    const target = {
-      x: clamp(player.x + dir.x, 0, COLS - 1),
-      y: clamp(player.y + dir.y, 0, ROWS - 1),
-    };
-
-    if (target.x !== player.x || target.y !== player.y) {
-      const targetKey = key(target.x, target.y);
-      const targetClaimed = updated.claimed[target.y][target.x];
-      const targetTrail = updated.trailSet.has(targetKey);
-
-      if (updated.drawing) {
-        if (targetTrail) return loseLife(updated, "Hai incrociato la tua scia.");
-        if (targetClaimed) {
-          updated = { ...updated, player: target };
-          return claimClosedArea(updated);
-        }
-        const trailSet = new Set(updated.trailSet);
-        trailSet.add(targetKey);
-        updated = {
-          ...updated,
-          player: target,
-          slowTrail: updated.slowTrail && updated.slowMode,
-          trail: [...updated.trail, target],
-          trailSet,
-        };
-      } else if (targetClaimed) {
-        updated = { ...updated, player: target };
-      } else {
-        const trailSet = new Set<string>([targetKey]);
-        updated = {
-          ...updated,
-          drawing: true,
-          slowTrail: updated.slowMode,
-          fuse: 0,
-          player: target,
-          trail: [target],
-          trailSet,
-        };
+  // ── FUSE: burn trail when player stops while drawing ──
+  if (updated.drawing && dir.x === 0 && dir.y === 0) {
+    const newFuseTimer = updated.fuseTimer + 1;
+    let newFuseIndex = updated.fuseIndex;
+    
+    if (newFuseTimer >= 3) {
+      newFuseIndex = updated.fuseIndex + 1;
+      updated = { ...updated, fuseTimer: 0, fuseIndex: newFuseIndex };
+      
+      // Spark at the fuse head
+      if (newFuseIndex < updated.trail.length) {
+        const fusePt = updated.trail[newFuseIndex];
+        spawnExplosion(fusePt.x * CELL + CELL / 2, fusePt.y * CELL + CELL / 2, "#ff3700", 4);
       }
+    } else {
+      updated = { ...updated, fuseTimer: newFuseTimer };
     }
+    
+    if (updated.fuseIndex >= updated.trail.length) {
+      return loseLife(updated, "La miccia ha raggiunto la tua penna.");
+    }
+    
+    return updated;
   }
 
-  if (updated.drawing && qixTrailTouchCells(previousQixPoint, nextQix).some((cell) => updated.trailSet.has(key(cell.x, cell.y)))) {
-    return loseLife(updated, "Il QIX ha tagliato la tua scia.");
+  // ── Player resumes moving: cancel fuse ──
+  if (updated.drawing && updated.fuseIndex > 0) {
+    updated = { ...updated, fuseIndex: 0, fuseTimer: 0 };
   }
 
-  if (Math.abs(qixCell.x - updated.player.x) <= 1 && Math.abs(qixCell.y - updated.player.y) <= 1) {
+  if (dir.x === 0 && dir.y === 0) return updated;
+
+  const player = updated.player;
+  const target = {
+    x: clamp(player.x + dir.x, 0, COLS - 1),
+    y: clamp(player.y + dir.y, 0, ROWS - 1),
+  };
+
+  if (target.x === player.x && target.y === player.y) return updated;
+
+  const targetKey = key(target.x, target.y);
+  const targetClaimed = updated.claimed[target.y][target.x];
+  const targetTrail = updated.trailSet.has(targetKey);
+
+  // ── SLOW MODE: when Space is held while drawing, move at half speed ──
+  if (updated.drawing && updated.slowMode) {
+    const newSlowTick = updated.slowTick + 1;
+    if (newSlowTick % 2 !== 0) {
+      // Skip movement this tick (half speed)
+      return { ...updated, slowTick: newSlowTick };
+    }
+    updated = { ...updated, slowTick: newSlowTick };
+  }
+
+  if (updated.drawing) {
+    if (targetTrail) return loseLife(updated, "Hai incrociato la tua scia.");
+    if (targetClaimed) {
+      updated = { ...updated, player: target };
+      return claimClosedArea(updated);
+    }
+    const trailSet = new Set(updated.trailSet);
+    trailSet.add(targetKey);
+    updated = { ...updated, player: target, trail: [...updated.trail, target], trailSet };
+  } else if (targetClaimed) {
+    updated = { ...updated, player: target };
+  } else {
+    // Starting to draw: check if Space is held for slow mode
+    const startSlow = updated.spaceHeld;
+    const trailSet = new Set<string>([targetKey]);
+    updated = { ...updated, drawing: true, player: target, trail: [target], trailSet, slowMode: startSlow, slowTick: 0 };
+  }
+
+  // Hit between player and QIX
+  const playerHitQix = Math.abs(nextQix.x - updated.player.x) < 1.6 && Math.abs(nextQix.y - updated.player.y) < 1.6;
+  if (playerHitQix) {
     return loseLife(updated, "Il QIX ti ha colpito.");
   }
 
-  const sparkCollision = resolveSparkCollisions(updated, sparkSweeps);
-  if (sparkCollision) return sparkCollision;
+  // Hit between SPARKS and player or trail
+  for (const spark of updated.sparks) {
+    const isPlayerHitOnBorder = spark.x === updated.player.x && spark.y === updated.player.y && !updated.drawing;
+    if (isPlayerHitOnBorder) {
+      return loseLife(updated, "Uno Sparx ti ha raggiunto sul bordo.");
+    }
+
+    if (updated.drawing) {
+      // Check if Spark is adjacent to or on any cell in the trail
+      const isSparkHittingTrail = updated.trail.some(
+        (pt) => Math.abs(spark.x - pt.x) <= 1 && Math.abs(spark.y - pt.y) <= 1
+      );
+      if (isSparkHittingTrail) {
+        return loseLife(updated, "Uno Sparx ha colpito la tua scia.");
+      }
+    }
+  }
 
   return updated;
 }
 
-function drawGame(ctx: CanvasRenderingContext2D, game: Game) {
-  ctx.clearRect(0, 0, COLS * CELL, ROWS * CELL);
-  ctx.fillStyle = "#030712";
-  ctx.fillRect(0, 0, COLS * CELL, ROWS * CELL);
+// ── Demo AI: simple player that claims territory ──
+let aiState: {
+  phase: "border" | "drawing" | "returning";
+  targetX: number;
+  targetY: number;
+  moveTimer: number;
+  dirChangeTimer: number;
+  currentDir: Point;
+  drawDepth: number;
+} = {
+  phase: "border",
+  targetX: 0,
+  targetY: 0,
+  moveTimer: 0,
+  dirChangeTimer: 0,
+  currentDir: { x: 1, y: 0 },
+  drawDepth: 0,
+};
 
+function getAIDirection(game: Game): Point {
+  const p = game.player;
+  const qixX = Math.round(game.qix.x);
+  const qixY = Math.round(game.qix.y);
+  
+  // Simple AI: move along border, occasionally venture inward
+  if (game.drawing) {
+    // If drawing, try to close the shape by heading back to border
+    aiState.drawDepth++;
+    
+    // After going deep enough, head back to claimed territory
+    if (aiState.drawDepth > 8 + Math.floor(Math.random() * 8)) {
+      // Find nearest claimed cell direction
+      const dirs = [
+        { x: 0, y: -1 },
+        { x: 0, y: 1 },
+        { x: -1, y: 0 },
+        { x: 1, y: 0 },
+      ];
+      
+      // Prefer direction toward border/claimed, avoid QIX
+      const safe = dirs.filter((d) => {
+        const nx = p.x + d.x;
+        const ny = p.y + d.y;
+        if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) return false;
+        if (game.trailSet.has(key(nx, ny))) return false;
+        const distToQix = Math.abs(nx - qixX) + Math.abs(ny - qixY);
+        return distToQix > 5;
+      });
+      
+      if (safe.length > 0) {
+        // Prefer direction toward nearest claimed
+        safe.sort((a, b) => {
+          const distA = Math.min(
+            a.x === 0 ? p.x : a.x === 1 ? COLS - 1 - p.x : 999,
+            a.y === 0 ? p.y : a.y === 1 ? ROWS - 1 - p.y : 999
+          );
+          const distB = Math.min(
+            b.x === 0 ? p.x : b.x === 1 ? COLS - 1 - p.x : 999,
+            b.y === 0 ? p.y : b.y === 1 ? ROWS - 1 - p.y : 999
+          );
+          return distA - distB;
+        });
+        return safe[0];
+      }
+    }
+    
+    // Continue in current direction or turn
+    const currentDir = aiState.currentDir;
+    const nextX = p.x + currentDir.x;
+    const nextY = p.y + currentDir.y;
+    
+    if (nextX > 0 && nextX < COLS - 1 && nextY > 0 && nextY < ROWS - 1 && 
+        !game.claimed[nextY]?.[nextX] && !game.trailSet.has(key(nextX, nextY))) {
+      return currentDir;
+    }
+    
+    // Need to turn - pick a direction that continues into unclaimed
+    const turns = [
+      { x: 0, y: -1 },
+      { x: 0, y: 1 },
+      { x: -1, y: 0 },
+      { x: 1, y: 0 },
+    ].filter((d) => {
+      const nx = p.x + d.x;
+      const ny = p.y + d.y;
+      if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) return false;
+      if (game.trailSet.has(key(nx, ny))) return false;
+      const distToQix = Math.abs(nx - qixX) + Math.abs(ny - qixY);
+      return distToQix > 5;
+    });
+    
+    if (turns.length > 0) {
+      const chosen = turns[Math.floor(Math.random() * turns.length)];
+      aiState.currentDir = chosen;
+      return chosen;
+    }
+    
+    // Stuck, try to head to claimed
+    return { x: 0, y: 1 };
+  }
+  
+  // Not drawing - move along border/claimed territory
+  aiState.drawDepth = 0;
+  
+  // Check if on border/claimed
+  const onClaimed = game.claimed[p.y]?.[p.x];
+  
+  if (onClaimed) {
+    // Randomly decide to venture inward
+    if (Math.random() < 0.03) {
+      // Find direction into unclaimed
+      const inward = [
+        { x: 0, y: -1 },
+        { x: 0, y: 1 },
+        { x: -1, y: 0 },
+        { x: 1, y: 0 },
+      ].filter((d) => {
+        const nx = p.x + d.x;
+        const ny = p.y + d.y;
+        if (nx <= 0 || ny <= 0 || nx >= COLS - 1 || ny >= ROWS - 1) return false;
+        if (game.claimed[ny]?.[nx]) return false;
+        const distToQix = Math.abs(nx - qixX) + Math.abs(ny - qixY);
+        return distToQix > 8;
+      });
+      
+      if (inward.length > 0) {
+        const chosen = inward[Math.floor(Math.random() * inward.length)];
+        aiState.currentDir = chosen;
+        return chosen;
+      }
+    }
+    
+    // Move along claimed - prefer continuing current direction
+    const nextX = p.x + aiState.currentDir.x;
+    const nextY = p.y + aiState.currentDir.y;
+    if (nextX >= 0 && nextX < COLS && nextY >= 0 && nextY < ROWS && game.claimed[nextY]?.[nextX]) {
+      return aiState.currentDir;
+    }
+    
+    // Pick a random claimed neighbor
+    const claimedNeighbors = [
+      { x: 1, y: 0 },
+      { x: -1, y: 0 },
+      { x: 0, y: 1 },
+      { x: 0, y: -1 },
+    ].filter((d) => {
+      const nx = p.x + d.x;
+      const ny = p.y + d.y;
+      return nx >= 0 && ny >= 0 && nx < COLS && ny < ROWS && game.claimed[ny]?.[nx];
+    });
+    
+    if (claimedNeighbors.length > 0) {
+      const chosen = claimedNeighbors[Math.floor(Math.random() * claimedNeighbors.length)];
+      aiState.currentDir = chosen;
+      return chosen;
+    }
+  }
+  
+  return aiState.currentDir;
+}
+
+function stepDemoGame(game: Game): Game {
+  // AI decides direction
+  const aiDir = getAIDirection(game);
+  const gameWithDir = { ...game, dir: aiDir };
+  return stepGame(gameWithDir);
+}
+
+// ── Particle system for explosions ──
+let particles: { x: number; y: number; vx: number; vy: number; life: number; color: string; size: number }[] = [];
+
+function spawnExplosion(x: number, y: number, color: string, count = 20) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 1 + Math.random() * 3;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 30 + Math.random() * 20,
+      color,
+      size: 2 + Math.random() * 3,
+    });
+  }
+}
+
+function updateParticles() {
+  particles = particles.filter(p => {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.96;
+    p.vy *= 0.96;
+    p.life -= 1;
+    return p.life > 0;
+  });
+}
+
+function drawParticles(ctx: CanvasRenderingContext2D) {
+  for (const p of particles) {
+    const alpha = p.life / 50;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.color;
+    ctx.shadowColor = p.color;
+    ctx.shadowBlur = 8;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur = 0;
+}
+
+// ── Frame counter for animations ──
+let frameCount = 0;
+
+function drawGame(ctx: CanvasRenderingContext2D, game: Game) {
+  frameCount++;
+  const w = COLS * CELL;
+  const h = ROWS * CELL;
+
+  // ── Background: deep space with subtle starfield ──
+  ctx.fillStyle = "#000008";
+  ctx.fillRect(0, 0, w, h);
+
+  // Animated starfield
+  ctx.fillStyle = "rgba(255,255,255,0.15)";
+  for (let i = 0; i < 60; i++) {
+    const sx = ((i * 137.5 + frameCount * 0.02) % w);
+    const sy = ((i * 97.3 + frameCount * 0.01) % h);
+    const size = (Math.sin(frameCount * 0.05 + i) + 1) * 0.5 + 0.5;
+    ctx.fillRect(sx, sy, size, size);
+  }
+
+  // ── Grid overlay (Tron-style) ──
+  ctx.strokeStyle = "rgba(0, 255, 255, 0.06)";
+  ctx.lineWidth = 0.5;
+  for (let x = 0; x <= COLS; x += 2) {
+    ctx.beginPath();
+    ctx.moveTo(x * CELL, 0);
+    ctx.lineTo(x * CELL, h);
+    ctx.stroke();
+  }
+  for (let y = 0; y <= ROWS; y += 2) {
+    ctx.beginPath();
+    ctx.moveTo(0, y * CELL);
+    ctx.lineTo(w, y * CELL);
+    ctx.stroke();
+  }
+
+  // ── Claimed territory with gradient fill ──
   for (let y = 0; y < ROWS; y += 1) {
     for (let x = 0; x < COLS; x += 1) {
       if (game.claimed[y][x]) {
-        ctx.fillStyle =
-          x === 0 || y === 0 || x === COLS - 1 || y === ROWS - 1
-            ? "#0f766e"
-            : game.slowClaimed[y]?.[x]
-              ? "#7f1d1d"
-              : "#0f3b64";
-        ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+        const isBorder = x === 0 || y === 0 || x === COLS - 1 || y === ROWS - 1;
+        const isSlowClaimed = game.slowClaimed.has(key(x, y));
+        if (isBorder) {
+          // Neon green border
+          const pulse = Math.sin(frameCount * 0.08 + x * 0.1 + y * 0.1) * 0.3 + 0.7;
+          ctx.fillStyle = `rgba(0, 255, 65, ${0.4 * pulse})`;
+          ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+          ctx.fillStyle = `rgba(0, 255, 65, ${0.8 * pulse})`;
+          ctx.fillRect(x * CELL + 1, y * CELL + 1, CELL - 2, CELL - 2);
+        } else if (isSlowClaimed) {
+          // Slow-claimed area: deep red with subtle animation
+          const shade = Math.sin(frameCount * 0.03 + x * 0.15 + y * 0.15) * 15;
+          const r = 100 + shade * 0.5;
+          const g = 15 + shade * 0.2;
+          const b = 20 + shade * 0.3;
+          ctx.fillStyle = `rgb(${r},${g},${b})`;
+          ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+          // Subtle inner glow
+          ctx.fillStyle = `rgba(255, 50, 0, 0.15)`;
+          ctx.fillRect(x * CELL + 2, y * CELL + 2, CELL - 4, CELL - 4);
+        } else {
+          // Deep blue claimed area with subtle animation
+          const shade = Math.sin(frameCount * 0.03 + x * 0.15 + y * 0.15) * 15;
+          const r = 10 + shade * 0.3;
+          const g = 30 + shade * 0.5;
+          const b = 120 + shade;
+          ctx.fillStyle = `rgb(${r},${g},${b})`;
+          ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+          // Subtle inner glow
+          ctx.fillStyle = `rgba(0, 100, 255, 0.15)`;
+          ctx.fillRect(x * CELL + 2, y * CELL + 2, CELL - 4, CELL - 4);
+        }
       }
     }
   }
 
-  ctx.strokeStyle = "rgba(56, 189, 248, 0.18)";
-  ctx.lineWidth = 1;
-  for (let x = 0; x <= COLS; x += 4) {
-    ctx.beginPath();
-    ctx.moveTo(x * CELL, 0);
-    ctx.lineTo(x * CELL, ROWS * CELL);
-    ctx.stroke();
-  }
-  for (let y = 0; y <= ROWS; y += 4) {
-    ctx.beginPath();
-    ctx.moveTo(0, y * CELL);
-    ctx.lineTo(COLS * CELL, y * CELL);
-    ctx.stroke();
-  }
+  // ── Border glow effect ──
+  ctx.shadowColor = "#00ff41";
+  ctx.shadowBlur = 12;
+  ctx.strokeStyle = "#00ff41";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, w - 2, h - 2);
+  ctx.shadowBlur = 0;
 
-  ctx.fillStyle = game.slowTrail && game.slowMode ? "#fb923c" : "#facc15";
-  for (const p of game.trail) ctx.fillRect(p.x * CELL, p.y * CELL, CELL, CELL);
-  if (game.drawing && game.fuse > 0) {
-    const fuseCells = Math.min(game.trail.length, Math.ceil(game.fuse));
-    ctx.fillStyle = "#ef4444";
-    ctx.shadowColor = "#ef4444";
-    ctx.shadowBlur = 16;
-    for (let i = 0; i < fuseCells; i += 1) {
-      const p = game.trail[i];
+  // ── Trail with gradient, glow, and burning fuse ──
+  const trailLen = game.trail.length;
+  for (let i = 0; i < trailLen; i++) {
+    const p = game.trail[i];
+    const t = i / Math.max(trailLen - 1, 1);
+    const size = 4 + t * 6;
+    const offset = (CELL - size) / 2;
+    
+    // Check if this segment has burned into a fuse
+    const isFuse = game.fuseIndex > 0 && i <= game.fuseIndex;
+
+    if (isFuse) {
+      // Burning fuse segment (flashing red and orange)
+      const isFlash = Math.floor(frameCount / 3) % 2 === 0;
+      const fuseColor = isFlash ? "#ff3700" : "#ff9900";
+      ctx.shadowColor = fuseColor;
+      ctx.shadowBlur = 12;
+      ctx.fillStyle = fuseColor;
+      ctx.fillRect(p.x * CELL + 1, p.y * CELL + 1, CELL - 2, CELL - 2);
+    } else if (game.slowMode) {
+      // Slow mode trail: red/orange glow
+      const alpha = 0.4 + t * 0.6;
+      ctx.shadowColor = "#ff3300";
+      ctx.shadowBlur = 10 + t * 8;
+      ctx.fillStyle = `rgba(255, 50, 0, ${alpha * 0.3})`;
       ctx.fillRect(p.x * CELL, p.y * CELL, CELL, CELL);
+
+      // Core
+      ctx.fillStyle = `rgba(255, 80, 20, ${alpha})`;
+      ctx.fillRect(p.x * CELL + offset, p.y * CELL + offset, size, size);
+    } else {
+      // Normal yellow trail segment
+      const alpha = 0.4 + t * 0.6;
+      ctx.shadowColor = "#ffff00";
+      ctx.shadowBlur = 10 + t * 8;
+      ctx.fillStyle = `rgba(255, 255, 0, ${alpha * 0.3})`;
+      ctx.fillRect(p.x * CELL, p.y * CELL, CELL, CELL);
+
+      // Core
+      ctx.fillStyle = `rgba(255, 255, 0, ${alpha})`;
+      ctx.fillRect(p.x * CELL + offset, p.y * CELL + offset, size, size);
     }
-    ctx.shadowBlur = 0;
-  }
-
-  const q = game.qix;
-  ctx.save();
-  ctx.translate(q.x * CELL + CELL / 2, q.y * CELL + CELL / 2);
-  ctx.rotate(Math.sin(q.phase) * 0.75);
-  ctx.strokeStyle = "#fb7185";
-  ctx.lineWidth = 3;
-  ctx.shadowColor = "#fb7185";
-  ctx.shadowBlur = 18;
-  ctx.beginPath();
-  for (let i = 0; i < 9; i += 1) {
-    const angle = q.phase + i * 0.9;
-    const radius = CELL * (2.2 + Math.sin(q.phase * 1.7 + i) * 0.9);
-    const px = Math.cos(angle) * radius;
-    const py = Math.sin(angle * 1.3) * radius;
-    if (i === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  }
-  ctx.stroke();
-  ctx.restore();
-
-  for (const spark of game.sparks) {
-    drawSpark(ctx, spark, spark.phase);
   }
   ctx.shadowBlur = 0;
 
-  ctx.fillStyle = game.drawing ? (game.slowMode ? "#fb923c" : "#facc15") : "#67e8f9";
-  ctx.shadowColor = game.drawing ? (game.slowMode ? "#fb923c" : "#facc15") : "#67e8f9";
+  // ── QIX: menacing plasma entity ──
+  const q = game.qix;
+  const qx = q.x * CELL + CELL / 2;
+  const qy = q.y * CELL + CELL / 2;
+
+  // Outer aura
+  const auraGrad = ctx.createRadialGradient(qx, qy, 0, qx, qy, CELL * 4);
+  auraGrad.addColorStop(0, "rgba(255, 0, 100, 0.15)");
+  auraGrad.addColorStop(1, "rgba(255, 0, 100, 0)");
+  ctx.fillStyle = auraGrad;
+  ctx.fillRect(qx - CELL * 4, qy - CELL * 4, CELL * 8, CELL * 8);
+
+  // Main body: rotating plasma shape
+  ctx.save();
+  ctx.translate(qx, qy);
+  ctx.rotate(q.phase * 0.5);
+
+  // Multiple overlapping shapes for plasma effect
+  for (let layer = 0; layer < 3; layer++) {
+    const layerOffset = layer * 0.4;
+    const colors = ["#ff0066", "#ff3399", "#ff66cc"];
+    ctx.strokeStyle = colors[layer];
+    ctx.lineWidth = 3 - layer;
+    ctx.shadowColor = colors[layer];
+    ctx.shadowBlur = 20 - layer * 5;
+
+    ctx.beginPath();
+    for (let i = 0; i < 12; i++) {
+      const angle = q.phase * (1 + layer * 0.3) + i * (Math.PI * 2 / 12) + layerOffset;
+      const radius = CELL * (1.8 + Math.sin(q.phase * 2 + i * 0.8 + layer) * 0.8);
+      const px = Math.cos(angle) * radius;
+      const py = Math.sin(angle * 1.2 + layerOffset) * radius;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.stroke();
+  }
+
+  // Core glow
+  const coreGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, CELL * 1.5);
+  coreGrad.addColorStop(0, "rgba(255, 255, 255, 0.6)");
+  coreGrad.addColorStop(0.5, "rgba(255, 0, 100, 0.3)");
+  coreGrad.addColorStop(1, "rgba(255, 0, 100, 0)");
+  ctx.fillStyle = coreGrad;
+  ctx.beginPath();
+  ctx.arc(0, 0, CELL * 1.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+  ctx.shadowBlur = 0;
+
+  // ── Sparx: glowing spinning crosses ──
+  for (const spark of game.sparks) {
+    const sx = spark.x * CELL + CELL / 2;
+    const sy = spark.y * CELL + CELL / 2;
+    const pulse = Math.sin(frameCount * 0.3) * 0.2 + 0.8;
+
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(frameCount * 0.25);
+
+    ctx.shadowColor = "#ff3700";
+    ctx.shadowBlur = 12;
+    ctx.strokeStyle = `rgba(255, 60, 0, ${pulse})`;
+    ctx.lineWidth = 3;
+
+    // Draw a spinning cross (arcade style)
+    ctx.beginPath();
+    ctx.moveTo(-CELL * 0.7, 0);
+    ctx.lineTo(CELL * 0.7, 0);
+    ctx.moveTo(0, -CELL * 0.7);
+    ctx.lineTo(0, CELL * 0.7);
+    ctx.stroke();
+
+    // Inner bright core
+    ctx.strokeStyle = `rgba(255, 255, 200, ${pulse})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(-CELL * 0.4, 0);
+    ctx.lineTo(CELL * 0.4, 0);
+    ctx.moveTo(0, -CELL * 0.4);
+    ctx.lineTo(0, CELL * 0.4);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+  ctx.shadowBlur = 0;
+
+  // ── Player: arcade-style ship ──
+  const px = game.player.x * CELL + CELL / 2;
+  const py = game.player.y * CELL + CELL / 2;
+  const playerColor = game.drawing ? (game.slowMode ? "#ff3300" : "#ffff00") : "#00ffff";
+  const playerPulse = Math.sin(frameCount * 0.15) * 0.2 + 0.8;
+
+  // Glow aura
+  const playerAura = ctx.createRadialGradient(px, py, 0, px, py, CELL * 2);
+  playerAura.addColorStop(0, `${playerColor}40`);
+  playerAura.addColorStop(1, `${playerColor}00`);
+  ctx.fillStyle = playerAura;
+  ctx.fillRect(px - CELL * 2, py - CELL * 2, CELL * 4, CELL * 4);
+
+  // Ship shape
+  ctx.save();
+  ctx.translate(px, py);
+
+  // Determine rotation based on direction
+  let angle = 0;
+  if (game.dir.x === 1) angle = 0;
+  else if (game.dir.x === -1) angle = Math.PI;
+  else if (game.dir.y === -1) angle = -Math.PI / 2;
+  else if (game.dir.y === 1) angle = Math.PI / 2;
+  ctx.rotate(angle);
+
+  ctx.shadowColor = playerColor;
   ctx.shadowBlur = 16;
-  ctx.fillRect(game.player.x * CELL - 1, game.player.y * CELL - 1, CELL + 2, CELL + 2);
+  ctx.fillStyle = playerColor;
+
+  // Arrow/ship shape
+  ctx.beginPath();
+  ctx.moveTo(CELL * 0.6, 0);
+  ctx.lineTo(-CELL * 0.4, -CELL * 0.4);
+  ctx.lineTo(-CELL * 0.2, 0);
+  ctx.lineTo(-CELL * 0.4, CELL * 0.4);
+  ctx.closePath();
+  ctx.fill();
+
+  // Engine glow
+  ctx.fillStyle = game.drawing ? "#ff6600" : "#0088ff";
+  ctx.shadowColor = game.drawing ? "#ff6600" : "#0088ff";
+  ctx.shadowBlur = 10;
+  ctx.beginPath();
+  ctx.arc(-CELL * 0.25, 0, CELL * 0.15 * playerPulse, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+  ctx.shadowBlur = 0;
+
+  // ── Particles ──
+  updateParticles();
+  drawParticles(ctx);
+
+  // ── CRT Scanlines overlay ──
+  ctx.fillStyle = "rgba(0,0,0,0.08)";
+  for (let y = 0; y < h; y += 3) {
+    ctx.fillRect(0, y, w, 1);
+  }
+
+  // ── Vignette ──
+  const vignette = ctx.createRadialGradient(w / 2, h / 2, w * 0.3, w / 2, h / 2, w * 0.7);
+  vignette.addColorStop(0, "rgba(0,0,0,0)");
+  vignette.addColorStop(1, "rgba(0,0,0,0.4)");
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, 0, w, h);
+
+  // ── HUD overlay on canvas ──
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = "rgba(0, 255, 65, 0.9)";
+  ctx.font = "bold 11px monospace";
+  ctx.textAlign = "left";
+  ctx.fillText(`LVL ${game.level}`, 8, 16);
+  ctx.textAlign = "center";
+  ctx.fillText(`SCORE ${game.score.toString().padStart(7, "0")}`, w / 2, 16);
+  ctx.textAlign = "right";
+  ctx.fillText(`${game.percent}%/${TARGET_PERCENT}%`, w - 8, 16);
+
+  // Lives as small ship icons
+  for (let i = 0; i < game.lives; i++) {
+    ctx.fillStyle = "#00ffff";
+    ctx.shadowColor = "#00ffff";
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.moveTo(16 + i * 16, h - 8);
+    ctx.lineTo(8 + i * 16, h - 14);
+    ctx.lineTo(10 + i * 16, h - 11);
+    ctx.lineTo(8 + i * 16, h - 8);
+    ctx.closePath();
+    ctx.fill();
+  }
   ctx.shadowBlur = 0;
 }
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const gameRef = useRef(createInitialGame());
-  const promptedScoreRef = useRef("");
-  const pendingScoreRef = useRef<PendingScore | null>(null);
-  const postGameIdleTicksRef = useRef(0);
-  const pressedMoveKeysRef = useRef<string[]>([]);
-  const attractRef = useRef<AttractState>({ phase: "title", ticks: 0 });
-  const autoPilotRef = useRef<AutoPilotState>({
-    enabled: false,
-    route: [],
-    endTicks: 0,
-    stuckTicks: 0,
-    lastPlayerKey: "",
-  });
   const [hud, setHud] = useState(gameRef.current);
-  const [highScores, setHighScores] = useState(loadHighScores);
-  const [pendingScore, setPendingScore] = useState<PendingScore | null>(null);
-  const [initials, setInitials] = useState("AAA");
-  const [autoPlay, setAutoPlay] = useState(false);
-  const [attract, setAttract] = useState<AttractState>(attractRef.current);
-  const [credits, setCredits] = useState(0);
+  const [highScores, setHighScores] = useState<HighScore[]>(() => loadHighScores());
+  const [initials, setInitials] = useState("");
+  const [isAttract, setIsAttract] = useState(true);
+  const [attractPhase, setAttractPhase] = useState<"splash" | "demo" | "attractScores">("splash");
+  const [insertCoinBlink, setInsertCoinBlink] = useState(true);
+  const [levelCountdown, setLevelCountdown] = useState(5);
+  const attractTimerRef = useRef(0);
+  const attractPhaseRef = useRef<"splash" | "demo" | "attractScores">("splash");
+  const isAttractRef = useRef(true);
+  const idleTimerRef = useRef(0);
+  const levelTransitionTimerRef = useRef(0);
 
   const sync = () => setHud({ ...gameRef.current });
-  const setAttractState = (next: AttractState) => {
-    attractRef.current = next;
-    setAttract(next);
-  };
 
-  const resetPromptState = () => {
-    promptedScoreRef.current = "";
-    pendingScoreRef.current = null;
-    setPendingScore(null);
-  };
-
-  const directionFromPressedKeys = () => {
-    for (let i = pressedMoveKeysRef.current.length - 1; i >= 0; i -= 1) {
-      const dir = DIRS[pressedMoveKeysRef.current[i]];
-      if (dir) return dir;
-    }
-    return ZERO_DIR;
-  };
-
-  const clearHeldControls = () => {
-    pressedMoveKeysRef.current = [];
-  };
-
-  const syncHeldDirection = () => {
-    gameRef.current = { ...gameRef.current, dir: directionFromPressedKeys() };
-    sync();
-  };
-
-  const setAutoplayEnabled = (enabled: boolean) => {
-    autoPilotRef.current = {
-      ...autoPilotRef.current,
-      enabled,
-      route: [],
-      endTicks: 0,
-      stuckTicks: 0,
-      lastPlayerKey: "",
-    };
-    setAutoPlay(enabled);
-    if (enabled && (gameRef.current.status === "ready" || gameRef.current.status === "paused")) {
-      gameRef.current = { ...gameRef.current, status: "playing", message: "" };
-      sync();
-    }
-  };
-
-  const insertCoin = () => {
-    resetPromptState();
-    clearHeldControls();
-    setCredits((value) => value + 1);
-    if (attractRef.current.phase === "off" && gameRef.current.status === "playing") return;
-
-    setAutoplayEnabled(false);
-    setAttractState({ phase: "off", ticks: 0 });
-    gameRef.current = {
-      ...createInitialGame(1),
-      message: "Credito inserito. Premi R per iniziare",
-    };
+  const returnToAttract = () => {
+    isAttractRef.current = true;
+    setIsAttract(true);
+    attractPhaseRef.current = "splash";
+    setAttractPhase("splash");
+    attractTimerRef.current = 0;
+    idleTimerRef.current = 0;
+    levelTransitionTimerRef.current = 0;
+    setLevelCountdown(5);
+    setInitials("");
+    gameRef.current = createInitialGame(1);
     sync();
   };
 
   const startGame = () => {
-    resetPromptState();
-    clearHeldControls();
-    setAutoplayEnabled(false);
-    setAttractState({ phase: "off", ticks: 0 });
-    setCredits((value) => Math.max(0, value - 1));
-    gameRef.current = {
-      ...createInitialGame(1),
-      status: "playing",
-      message: "",
-    };
+    isAttractRef.current = false;
+    setIsAttract(false);
+    attractTimerRef.current = 0;
+    idleTimerRef.current = 0;
+    levelTransitionTimerRef.current = 0;
+    setLevelCountdown(5);
+    gameRef.current = createInitialGame(1);
+    gameRef.current = { ...gameRef.current, status: "ready", message: "Premi una freccia o WASD per iniziare" };
     sync();
   };
 
-  const enterAttractPhase = (phase: Exclude<AttractPhase, "off">) => {
-    resetPromptState();
-    clearHeldControls();
-    setAttractState({ phase, ticks: 0 });
-
-    if (phase === "demo") {
-      gameRef.current = {
-        ...createInitialGame(1),
-        status: "playing",
-        message: "",
-      };
-      setAutoplayEnabled(true);
-      return;
-    }
-
-    setAutoplayEnabled(false);
-    if (phase === "title") {
-      gameRef.current = {
-        ...createInitialGame(1),
-        message: "",
-      };
-    } else {
-      gameRef.current = { ...gameRef.current, status: "ready", dir: ZERO_DIR, message: "" };
-    }
-    sync();
-  };
-
-  const tickAttract = () => {
-    const current = attractRef.current;
-    if (current.phase === "off") return;
-
-    const ticks = current.ticks + 1;
-    if (current.phase === "title" && ticks >= ATTRACT_TITLE_TICKS) {
-      enterAttractPhase("demo");
-      return;
-    }
-    if (current.phase === "demo" && ticks >= ATTRACT_DEMO_TICKS) {
-      enterAttractPhase("scores");
-      return;
-    }
-    if (current.phase === "scores" && ticks >= ATTRACT_SCORES_TICKS) {
-      enterAttractPhase("title");
-      return;
-    }
-
-    setAttractState({ ...current, ticks });
-  };
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.target instanceof HTMLInputElement) return;
-      if (event.code === "KeyP") {
-        event.preventDefault();
-        setAttractState({ phase: "off", ticks: 0 });
-        setAutoplayEnabled(!autoPilotRef.current.enabled);
-        return;
-      }
-      if (event.code === "KeyR") {
-        event.preventDefault();
-        startGame();
-        return;
-      }
-      if (event.code === "KeyN") {
-        if (gameRef.current.status === "won") {
-          resetPromptState();
-          gameRef.current = {
-            ...createInitialGame(gameRef.current.level + 1, gameRef.current.score, gameRef.current.lives),
-            status: "playing",
-            message: "",
-          };
-          sync();
-        }
-        return;
-      }
-      if (event.code === "Space") {
-        event.preventDefault();
-        if (attractRef.current.phase === "off" && gameRef.current.status === "playing") {
-          gameRef.current = { ...gameRef.current, slowMode: true };
-          sync();
-          return;
-        }
-        insertCoin();
-        return;
-      }
-      const dir = DIRS[event.code];
-      if (dir) {
-        event.preventDefault();
-        if (attractRef.current.phase !== "off") return;
-        if (autoPilotRef.current.enabled) setAutoplayEnabled(false);
-        if (!pressedMoveKeysRef.current.includes(event.code)) {
-          pressedMoveKeysRef.current = [...pressedMoveKeysRef.current, event.code];
-        }
-        const status = gameRef.current.status;
-        if (status === "ready" || status === "paused") {
-          gameRef.current = { ...gameRef.current, status: "playing", message: "", dir: directionFromPressedKeys() };
-        } else if (status === "playing") {
-          gameRef.current = { ...gameRef.current, dir: directionFromPressedKeys() };
-        }
-        sync();
-      }
-    };
-    const onKeyUp = (event: KeyboardEvent) => {
-      if (event.target instanceof HTMLInputElement) return;
-      if (event.code === "Space" && attractRef.current.phase === "off" && gameRef.current.status === "playing") {
-        event.preventDefault();
-        gameRef.current = { ...gameRef.current, slowMode: false };
-        sync();
-        return;
-      }
-      if (DIRS[event.code]) {
-        event.preventDefault();
-        pressedMoveKeysRef.current = pressedMoveKeysRef.current.filter((code) => code !== event.code);
-        if (attractRef.current.phase === "off" && !autoPilotRef.current.enabled) syncHeldDirection();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (hud.status !== "lost") return;
-
-    const promptKey = `${hud.status}:${hud.score}:${hud.level}:${hud.percent}`;
-    if (promptedScoreRef.current === promptKey) return;
-    promptedScoreRef.current = promptKey;
-
-    if (qualifiesHighScore(highScores, hud.score)) {
-      if (autoPlay) return;
-      setInitials("AAA");
-      const nextPendingScore = {
+  const submitScore = () => {
+    if (initials.length === 3) {
+      const updated = addHighScore(highScores, {
+        initials: initials.toUpperCase(),
         score: hud.score,
         level: hud.level,
-        percent: hud.percent,
-        date: new Date().toISOString(),
-      };
-      pendingScoreRef.current = nextPendingScore;
-      setPendingScore(nextPendingScore);
+      });
+      setHighScores(updated);
+      // After entering initials, return to attract mode
+      returnToAttract();
     }
-  }, [autoPlay, highScores, hud.level, hud.percent, hud.score, hud.status]);
+  };
 
+  // ── Attract mode cycle (uses refs, timer-based) ──
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (!isAttractRef.current) return;
+      
+      attractTimerRef.current += 100;
+      const t = attractTimerRef.current;
+      const phase = attractPhaseRef.current;
+
+      if (phase === "splash" && t >= SPLASH_DURATION) {
+        attractPhaseRef.current = "demo";
+        setAttractPhase("demo");
+        attractTimerRef.current = 0;
+        // Init demo game
+        gameRef.current = createInitialGame(1);
+        gameRef.current = { ...gameRef.current, status: "playing", message: "" };
+        aiState = { phase: "border", targetX: 0, targetY: 0, moveTimer: 0, dirChangeTimer: 0, currentDir: { x: 1, y: 0 }, drawDepth: 0 };
+        sync();
+      } else if (phase === "demo" && t >= DEMO_DURATION) {
+        attractPhaseRef.current = "attractScores";
+        setAttractPhase("attractScores");
+        attractTimerRef.current = 0;
+      } else if (phase === "attractScores" && t >= SCORES_DURATION) {
+        attractPhaseRef.current = "splash";
+        setAttractPhase("splash");
+        attractTimerRef.current = 0;
+        gameRef.current = createInitialGame(1);
+        sync();
+      }
+    }, 100);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Insert coin blink (always active for arcade feel)
+  useEffect(() => {
+    const blink = setInterval(() => setInsertCoinBlink((prev) => !prev), 500);
+    return () => clearInterval(blink);
+  }, []);
+
+  // ── Main game loop ──
   useEffect(() => {
     const ctx = canvasRef.current?.getContext("2d");
     if (!ctx) return;
     drawGame(ctx, gameRef.current);
     const timer = window.setInterval(() => {
-      tickAttract();
-      gameRef.current = applyAutoplay(gameRef.current, autoPilotRef.current);
-      gameRef.current = stepGame(gameRef.current);
-      if (attractRef.current.phase === "off" && gameRef.current.status === "lost" && !pendingScoreRef.current) {
-        postGameIdleTicksRef.current += 1;
-        if (postGameIdleTicksRef.current >= POST_GAME_ATTRACT_TICKS) {
-          postGameIdleTicksRef.current = 0;
-          enterAttractPhase("title");
+      const phase = attractPhaseRef.current;
+      if (isAttractRef.current && phase === "demo") {
+        gameRef.current = stepDemoGame(gameRef.current);
+        if (gameRef.current.status !== "playing") {
+          gameRef.current = createInitialGame(1);
+          gameRef.current = { ...gameRef.current, status: "playing", message: "" };
+          aiState = { phase: "border", targetX: 0, targetY: 0, moveTimer: 0, dirChangeTimer: 0, currentDir: { x: 1, y: 0 }, drawDepth: 0 };
         }
-      } else {
-        postGameIdleTicksRef.current = 0;
+      } else if (!isAttractRef.current) {
+        gameRef.current = stepGame(gameRef.current);
+        // Auto-advance after completing a level: 5s "Get Ready" countdown.
+        const st = gameRef.current.status;
+        if (st === "won") {
+          levelTransitionTimerRef.current += TICK_MS;
+          const remaining = Math.max(1, Math.ceil((LEVEL_COMPLETE_DURATION - levelTransitionTimerRef.current) / 1000));
+          setLevelCountdown(remaining);
+          if (levelTransitionTimerRef.current >= LEVEL_COMPLETE_DURATION) {
+            const nextLevel = gameRef.current.level + 1;
+            const score = gameRef.current.score;
+            gameRef.current = createInitialGame(nextLevel, score);
+            gameRef.current = { ...gameRef.current, status: "playing", message: "" };
+            levelTransitionTimerRef.current = 0;
+            setLevelCountdown(5);
+          }
+        } else {
+          levelTransitionTimerRef.current = 0;
+          setLevelCountdown(5);
+        }
+
+        // Auto-return to attract if idle on game over for 15s.
+        if (st === "lost") {
+          idleTimerRef.current += TICK_MS;
+          if (idleTimerRef.current >= 15000) {
+            returnToAttract();
+          }
+        } else {
+          idleTimerRef.current = 0;
+        }
       }
-      (window as DebugWindow).__qixDebug = {
-        game: gameRef.current,
-        attract: attractRef.current,
-        autoplay: {
-          enabled: autoPilotRef.current.enabled,
-          routeLength: autoPilotRef.current.route.length,
-          stuckTicks: autoPilotRef.current.stuckTicks,
-        },
-      };
       drawGame(ctx, gameRef.current);
       setHud({ ...gameRef.current });
     }, TICK_MS);
     return () => window.clearInterval(timer);
   }, []);
 
-  const statusText = hud.status === "won" ? "Vittoria" : hud.status === "lost" ? "Sconfitta" : hud.status === "paused" ? "Pausa" : hud.status === "ready" ? "Pronto" : "In gioco";
-  const attractDuration =
-    attract.phase === "title" ? ATTRACT_TITLE_TICKS : attract.phase === "demo" ? ATTRACT_DEMO_TICKS : ATTRACT_SCORES_TICKS;
-  const attractSeconds = attract.phase === "off" ? 0 : Math.max(0, Math.ceil(((attractDuration - attract.ticks) * TICK_MS) / 1000));
-  const modeText =
-    attract.phase === "title" ? "Titolo" : attract.phase === "demo" ? "Demo" : attract.phase === "scores" ? "Classifica" : "Gioco";
-  const focusedPlay =
-    attract.phase === "off" && (hud.status === "playing" || hud.status === "paused" || hud.status === "won") && !autoPlay;
-  const showInfoPanel = !focusedPlay;
-  const submitHighScore = () => {
-    if (!pendingScore) return;
-    const nextScores = insertHighScore(highScores, {
-      ...pendingScore,
-      initials: normalizeInitials(initials),
-    });
-    saveHighScores(nextScores);
-    setHighScores(nextScores);
-    pendingScoreRef.current = null;
-    setPendingScore(null);
-  };
-  const resetHighScores = () => {
-    if (!window.confirm("Cancellare tutti gli high-score salvati su questo browser?")) return;
-    localStorage.removeItem(HIGH_SCORE_KEY);
-    setHighScores([]);
-  };
+  // ── Keyboard handler ──
+  const keysPressed = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      // Attract mode: any key starts game
+      if (isAttractRef.current) {
+        startGame();
+        return;
+      }
+
+      // Any key resets idle timer
+      idleTimerRef.current = 0;
+
+      // Handle initials entry
+      if (hud.status === "enterName") {
+        if (event.code === "Enter" && initials.length === 3) {
+          submitScore();
+          return;
+        }
+        if (event.code === "Backspace") {
+          setInitials((prev) => prev.slice(0, -1));
+          return;
+        }
+        if (event.key.length === 1 && /[a-zA-Z]/.test(event.key) && initials.length < 3) {
+          setInitials((prev) => prev + event.key.toUpperCase());
+          return;
+        }
+        return;
+      }
+
+      // Allow restart with R from lost/won states → return to attract
+      if (event.code === "KeyR" && (hud.status === "lost" || hud.status === "won")) {
+        returnToAttract();
+        return;
+      }
+
+      if (event.code === "Space") {
+        event.preventDefault();
+        // Space = slow mode modifier while playing
+        gameRef.current = { ...gameRef.current, spaceHeld: true };
+        sync();
+        return;
+      }
+
+      if (event.code === "KeyP") {
+        event.preventDefault();
+        const status = hud.status;
+        if (status === "paused" || status === "ready") {
+          gameRef.current = { ...gameRef.current, status: "playing", message: "" };
+        } else if (status === "playing") {
+          gameRef.current = { ...gameRef.current, status: "paused", message: "In pausa. Premi P per continuare" };
+        }
+        sync();
+        return;
+      }
+
+      const dir = DIRS[event.code];
+      if (dir) {
+        event.preventDefault();
+        keysPressed.current.add(event.code);
+        const status = hud.status;
+        if (status === "ready" || status === "paused") {
+          gameRef.current = { ...gameRef.current, status: "playing", message: "", dir };
+        } else if (status === "playing") {
+          gameRef.current = { ...gameRef.current, dir };
+        }
+        sync();
+      }
+    };
+
+    const onKeyUp = (event: KeyboardEvent) => {
+      keysPressed.current.delete(event.code);
+      
+      // Clear spaceHeld when Space is released
+      if (event.code === "Space") {
+        gameRef.current = { ...gameRef.current, spaceHeld: false };
+        sync();
+        return;
+      }
+      
+      // Recompute direction from still-pressed keys
+      let newDir = { x: 0, y: 0 };
+      for (const code of keysPressed.current) {
+        const d = DIRS[code];
+        if (d) {
+          newDir = { x: newDir.x + d.x, y: newDir.y + d.y };
+        }
+      }
+      // Normalize cardinal
+      if (newDir.x !== 0) newDir.x = newDir.x > 0 ? 1 : -1;
+      if (newDir.y !== 0) newDir.y = newDir.y > 0 ? 1 : -1;
+      // Only allow cardinal movement
+      if (newDir.x !== 0 && newDir.y !== 0) {
+        // Keep the last-pressed direction
+        newDir = { x: 0, y: 0 };
+      }
+      gameRef.current = { ...gameRef.current, dir: newDir };
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, [hud.status, initials]);
+
+  const statusText = hud.status === "won" ? "VITTORIA!" : hud.status === "lost" ? "GAME OVER" : hud.status === "paused" ? "PAUSA" : hud.status === "enterName" ? "INSERISCI INIZIALI" : hud.status === "ready" ? "PRONTO" : "IN GIOCO";
 
   return (
-    <main className="min-h-screen bg-[#030712] text-cyan-50">
-      <div
-        className={`mx-auto flex min-h-screen w-full flex-col ${
-          focusedPlay ? "max-w-none px-2 py-2 sm:px-3 lg:px-4" : "max-w-7xl px-4 py-5 sm:px-6 lg:px-8"
-        }`}
-      >
-        <header
-          className={`flex flex-wrap items-end justify-between gap-4 border-b border-cyan-300/20 ${
-            focusedPlay ? "pb-2" : "pb-4"
-          }`}
-        >
-          <div>
-            {!focusedPlay && (
-              <p className="font-mono text-sm uppercase tracking-[0.45em] text-cyan-300/75">arcade territory duel</p>
-            )}
-            <h1 className={`font-mono font-black tracking-tight text-white ${focusedPlay ? "text-2xl sm:text-3xl" : "text-4xl sm:text-6xl"}`}>
-              QIX®-STYLE
-            </h1>
-          </div>
-          <div
-            className={`grid grid-cols-2 gap-y-1 font-mono text-sm sm:grid-cols-3 xl:grid-cols-7 ${
-              focusedPlay ? "gap-x-4" : "gap-x-8"
-            }`}
-          >
-            <span><b className="text-cyan-300">Livello</b> {hud.level}</span>
-            <span><b className="text-cyan-300">Score</b> {hud.score}</span>
-            <span><b className="text-cyan-300">Area</b> {hud.percent}%/{TARGET_PERCENT}%</span>
-            <span><b className="text-cyan-300">Vite</b> {hud.lives}</span>
-            <span><b className="text-cyan-300">Stato</b> {statusText}</span>
-            <span><b className="text-cyan-300">Modo</b> {modeText}</span>
-            <span><b className="text-cyan-300">Crediti</b> {credits}</span>
-          </div>
-        </header>
+    <main className="flex min-h-screen items-center justify-center bg-black p-2 sm:p-4">
+      {/* Arcade Cabinet Frame */}
+      <div className="relative w-full max-w-5xl">
+        {/* Cabinet top marquee */}
+        <div className="relative overflow-hidden rounded-t-2xl border-2 border-b-0 border-[#00ff41] bg-gradient-to-b from-[#0a1a0a] to-black px-4 py-3 text-center">
+          <div className="absolute inset-0 bg-[repeating-linear-gradient(0deg,rgba(0,255,65,0.03)_0px,rgba(0,255,65,0.03)_1px,transparent_1px,transparent_3px)] pointer-events-none" />
+          <p className="font-mono text-[10px] uppercase tracking-[0.5em] text-[#00ff41]/60">★ Taito-inspired Arcade ★</p>
+          <h1 className="font-mono text-3xl font-black tracking-tight text-[#00ff41] neon-text sm:text-5xl marquee-glow">
+            QIX
+          </h1>
+          <p className="font-mono text-xs uppercase tracking-[0.3em] text-[#00ff41]/50">Territory Conquest</p>
+        </div>
 
-        <section
-          className={`grid flex-1 items-center gap-6 ${focusedPlay ? "py-2 lg:grid-cols-1" : "py-6 lg:grid-cols-[1fr_310px]"}`}
-        >
-          <div
-            className={`relative overflow-hidden border border-cyan-300/35 bg-black shadow-[0_0_50px_rgba(34,211,238,0.18)] ${
-              focusedPlay ? "mx-auto w-full max-w-[calc((100vh-7.5rem)*1.4667)]" : ""
-            }`}
-          >
+        {/* Screen area with CRT effects */}
+        <div className="relative crt-curve crt-scanlines crt-flicker overflow-hidden border-x-2 border-[#00ff41] bg-black">
+          {/* HUD bar */}
+          <div className="flex items-center justify-between border-b border-[#00ff41]/30 bg-black/80 px-3 py-1.5 font-mono text-xs text-[#00ff41] sm:text-sm">
+            <span className="flex items-center gap-1">
+              <span className="text-[#00ff41]/60">LVL</span>
+              <span className="text-base font-black text-white">{hud.level}</span>
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="text-[#00ff41]/60">SCORE</span>
+              <span className="text-base font-black text-white">{hud.score.toString().padStart(7, "0")}</span>
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="text-[#00ff41]/60">AREA</span>
+              <span className="text-base font-black text-white">{hud.percent}%</span>
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="text-[#00ff41]/60">♥</span>
+              <span className="text-base font-black text-[#00ffff]">{hud.lives}</span>
+            </span>
+            <span className={`text-base font-black ${hud.status === "playing" ? "text-[#00ff41]" : hud.status === "won" ? "text-yellow-400" : hud.status === "lost" ? "text-red-500" : "text-[#ff8c00]"}`}>
+              {statusText}
+            </span>
+          </div>
+
+          {/* Game canvas */}
+          <div className="relative arcade-border">
             <canvas
               ref={canvasRef}
               width={COLS * CELL}
               height={ROWS * CELL}
               className="block h-auto w-full [image-rendering:pixelated]"
-              aria-label="Gioco arcade ispirato a QIX registrato"
+              aria-label="Gioco arcade QIX"
             />
-            {hud.message && attract.phase === "off" && (
-              <div className="absolute inset-x-0 top-1/2 mx-auto w-fit -translate-y-1/2 border border-cyan-200/60 bg-slate-950/90 px-6 py-4 text-center font-mono text-sm uppercase tracking-widest text-cyan-100 shadow-[0_0_30px_rgba(103,232,249,0.25)]">
+            {/* Message overlay */}
+            {hud.message && hud.status !== "enterName" && hud.status !== "won" && !isAttract && (
+              <div className="absolute inset-x-0 top-1/2 mx-auto w-fit -translate-y-1/2 border border-[#00ff41]/60 bg-black/90 px-6 py-4 text-center font-mono text-sm uppercase tracking-widest text-[#00ff41] shadow-[0_0_30px_rgba(0,255,65,0.4)]">
                 {hud.message}
               </div>
             )}
-            {attract.phase === "title" && (
-              <div className="absolute inset-0 grid place-items-center bg-slate-950/90 px-6 text-center font-mono text-cyan-100">
-                <div>
-                  <p className="mb-4 text-sm uppercase tracking-[0.55em] text-cyan-300">arcade territory duel</p>
-                  <h2 className="text-6xl font-black text-white sm:text-8xl">QIX®-STYLE</h2>
-                  <p className="mt-5 text-lg uppercase tracking-widest text-cyan-100">Press Space To Insert Coin</p>
-                  <p className="mt-2 text-sm uppercase tracking-widest text-cyan-300">R Start</p>
-                  <p className="mt-8 text-xs uppercase tracking-widest text-cyan-100/55">Demo in {attractSeconds}</p>
+
+            {/* Level complete countdown */}
+            {hud.status === "won" && !isAttract && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/80">
+                <div className="border-2 border-yellow-400 bg-black px-8 py-6 text-center font-mono shadow-[0_0_40px_rgba(250,204,21,0.45)]">
+                  <h2 className="mb-4 text-2xl font-black uppercase tracking-widest text-yellow-400 sm:text-3xl">
+                    Livello Completato
+                  </h2>
+                  <p className="mb-5 text-lg font-black uppercase tracking-widest text-[#00ff41]">Get Ready !</p>
+                  <div className="mx-auto flex h-16 w-16 items-center justify-center border-2 border-[#00ff41] text-4xl font-black text-white shadow-[0_0_24px_rgba(0,255,65,0.35)]">
+                    {levelCountdown}
+                  </div>
                 </div>
               </div>
             )}
-            {attract.phase === "demo" && (
-              <div className="absolute left-4 top-4 border border-amber-300/70 bg-black/80 px-3 py-2 font-mono text-xs font-black uppercase tracking-widest text-amber-200">
-                Demo Play · Space Insert Coin · {attractSeconds}
+
+            {/* Attract Mode: Splash Screen */}
+            {isAttract && attractPhase === "splash" && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80">
+                <h1 className="mb-4 font-mono text-5xl font-black tracking-tight text-[#00ff41] neon-text sm:text-7xl">
+                  QIX
+                </h1>
+                <p className="mb-8 font-mono text-sm uppercase tracking-[0.4em] text-[#00ff41]/60">Territory Conquest</p>
+                <p className={`font-mono text-xl font-black uppercase tracking-widest text-yellow-400 shadow-[0_0_20px_rgba(250,204,21,0.5)] transition-opacity duration-200 ${insertCoinBlink ? "opacity-100" : "opacity-0"}`}>
+                  INSERT COIN
+                </p>
+                <p className="mt-6 font-mono text-[10px] uppercase tracking-widest text-[#00ff41]/30">
+                  Premi un tasto per giocare
+                </p>
               </div>
             )}
-            {attract.phase === "scores" && (
-              <div className="absolute inset-0 bg-slate-950/95 px-8 py-10 font-mono text-cyan-100">
-                <div className="mx-auto flex h-full max-w-xl flex-col justify-center pt-6">
-                  <p className="mb-2 text-center text-xs uppercase tracking-[0.4em] text-cyan-300">Hall of Fame</p>
-                  <h2 className="mb-5 text-center text-3xl font-black uppercase text-white">High Scores</h2>
-                  <ol className="mx-auto w-full max-w-md space-y-1.5 text-base">
-                    {highScores.length === 0 ? (
-                      <li className="text-center text-cyan-100/55">No Records</li>
-                    ) : (
-                      highScores.map((entry, index) => (
-                        <li key={`${entry.initials}-${entry.score}-${entry.date}`} className="grid grid-cols-[3ch_5ch_4ch_1fr] gap-4">
-                          <span className="text-cyan-300">{String(index + 1).padStart(2, "0")}</span>
-                          <span className="font-black text-white">{entry.initials}</span>
-                          <span className="text-cyan-300 tabular-nums">L{entry.level}</span>
-                          <span className="text-right tabular-nums">{entry.score}</span>
-                        </li>
-                      ))
-                    )}
-                  </ol>
-                  <p className="mt-8 text-center text-sm uppercase tracking-widest text-cyan-300">Space Insert Coin · R Start</p>
-                  {highScores.length > 0 && (
-                    <button
-                      className="mx-auto mt-5 block border border-cyan-300/60 px-4 py-2 text-xs font-black uppercase tracking-widest text-cyan-100 hover:border-cyan-100 hover:text-white"
-                      type="button"
-                      onClick={resetHighScores}
-                    >
-                      Reset High Scores
-                    </button>
-                  )}
-                  <p className="mt-2 text-center text-xs uppercase tracking-widest text-cyan-100/55">Title in {attractSeconds}</p>
+
+            {/* Attract Mode: Demo label */}
+            {isAttract && attractPhase === "demo" && (
+              <div className="absolute top-2 left-1/2 -translate-x-1/2 font-mono text-xs uppercase tracking-widest text-[#00ff41]/40">
+                ★ DEMO PLAY ★
+              </div>
+            )}
+
+            {/* Attract Mode: High Scores */}
+            {isAttract && attractPhase === "attractScores" && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/90">
+                <div className="w-72 border-2 border-[#00ff41] bg-black p-4 font-mono shadow-[0_0_40px_rgba(0,255,65,0.5)]">
+                  <h2 className="mb-4 text-center text-xl font-black text-[#00ff41]">HIGH SCORES</h2>
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-[#00ff41]/60">
+                        <th className="pb-2 text-left">#</th>
+                        <th className="pb-2 text-left">NOME</th>
+                        <th className="pb-2 text-right">SCORE</th>
+                        <th className="pb-2 text-right">LVL</th>
+                      </tr>
+                    </thead>
+                    <tbody className="text-[#00ff41]">
+                      {highScores.length === 0 ? (
+                        <tr>
+                          <td colSpan={4} className="py-4 text-center text-[#00ff41]/40">
+                            Nessun punteggio
+                          </td>
+                        </tr>
+                      ) : (
+                        highScores.map((score, i) => (
+                          <tr key={i} className={i === 0 ? "text-yellow-400" : i === 1 ? "text-gray-300" : i === 2 ? "text-amber-600" : ""}>
+                            <td className="py-1">{i + 1}</td>
+                            <td className="py-1">{score.initials}</td>
+                            <td className="py-1 text-right">{score.score.toString().padStart(7, "0")}</td>
+                            <td className="py-1 text-right">{score.level}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                  <p className={`mt-4 text-center text-xs font-black uppercase tracking-widest text-yellow-400 transition-opacity duration-200 ${insertCoinBlink ? "opacity-100" : "opacity-0"}`}>
+                    INSERT COIN
+                  </p>
                 </div>
               </div>
             )}
-          </div>
 
-          {showInfoPanel && (
-          <aside className="space-y-6 font-mono text-sm leading-6 text-cyan-100/80">
-            <div>
-              <h2 className="mb-2 text-xl font-black uppercase tracking-widest text-white">Come si gioca</h2>
-              <p>
-                Muoviti sui bordi sicuri, entra nell'arena e chiudi poligoni per conquistare territorio. Vinci al {TARGET_PERCENT}%.
-              </p>
-            </div>
-            <div>
-              <h3 className="mb-2 font-bold uppercase tracking-widest text-cyan-300">Comandi</h3>
-              <p>Frecce o WASD: movimento</p>
-              <p>Spazio: insert coin</p>
-              <p>Spazio durante il gioco: slow draw</p>
-              <p>R: start</p>
-              <p>P: demo tecnica</p>
-              <p>N: prossimo livello (quando completato)</p>
-              <button
-                className="mt-3 w-full border border-cyan-300/60 px-3 py-2 font-black uppercase tracking-widest text-cyan-100 hover:border-cyan-100 hover:text-white"
-                type="button"
-                onClick={() => setAutoplayEnabled(!autoPlay)}
-              >
-                {autoPlay ? "Stop Demo" : "Autoplay"}
-              </button>
-            </div>
-            <div>
-              <h3 className="mb-2 font-bold uppercase tracking-widest text-cyan-300">Pericoli</h3>
-              <p>La forma rossa distrugge la tua scia. Gli Sparx arancioni pattugliano i bordi sicuri e valgono bonus se li intrappoli.</p>
-            </div>
-            <div>
-              <h3 className="mb-2 font-bold uppercase tracking-widest text-cyan-300">Note</h3>
-              <p className="text-xs leading-5 text-cyan-100/55">{LEGAL_NOTICE}</p>
-            </div>
-            <div>
-              <h3 className="mb-2 font-bold uppercase tracking-widest text-cyan-300">High Score</h3>
-              <ol className="space-y-1">
-                {highScores.length === 0 ? (
-                  <li className="text-cyan-100/50">---</li>
-                ) : (
-                  highScores.map((entry, index) => (
-                    <li key={`${entry.initials}-${entry.score}-${entry.date}`} className="grid grid-cols-[2ch_4ch_4ch_1fr] gap-3">
-                      <span className="text-cyan-300">{String(index + 1).padStart(2, "0")}</span>
-                      <span className="text-white">{entry.initials}</span>
-                      <span className="text-cyan-300 tabular-nums">L{entry.level}</span>
-                      <span className="text-right tabular-nums">{entry.score}</span>
-                    </li>
-                  ))
-                )}
-              </ol>
-              {highScores.length > 0 && (
-                <button
-                  className="mt-3 w-full border border-cyan-300/60 px-3 py-2 font-black uppercase tracking-widest text-cyan-100 hover:border-cyan-100 hover:text-white"
-                  type="button"
-                  onClick={resetHighScores}
-                >
-                  Reset High Scores
-                </button>
-              )}
-            </div>
-          </aside>
-          )}
-        </section>
+            {/* Enter Name overlay */}
+            {hud.status === "enterName" && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/85">
+                <div className="border-2 border-[#00ff41] bg-black p-6 text-center font-mono shadow-[0_0_40px_rgba(0,255,65,0.5)]">
+                  <h2 className="mb-4 text-2xl font-black text-[#00ff41]">GAME OVER</h2>
+                  <p className="mb-2 text-sm text-[#00ff41]/70">Punteggio: {hud.score.toString().padStart(7, "0")}</p>
+                  <p className="mb-4 text-sm text-[#00ff41]/70">Livello: {hud.level}</p>
+                  <p className="mb-3 text-xs uppercase tracking-widest text-[#00ff41]/60">Inserisci le tue iniziali</p>
+                  <div className="mb-4 flex justify-center gap-2">
+                    {[0, 1, 2].map((i) => (
+                      <div
+                        key={i}
+                        className={`flex h-10 w-10 items-center justify-center border-2 text-2xl font-black ${
+                          initials.length === i ? "border-[#00ff41] text-[#00ff41]" : "border-[#00ff41]/40 text-[#00ff41]/60"
+                        }`}
+                      >
+                        {initials[i] || "_"}
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[10px] uppercase tracking-widest text-[#00ff41]/40">
+                    {initials.length < 3 ? "Premi 3 lettere..." : "Premi INVIO per confermare"}
+                  </p>
+                </div>
+              </div>
+            )}
 
-        {pendingScore && (
-          <div className="fixed inset-0 z-10 grid place-items-center bg-slate-950/80 px-4">
-            <form
-              className="w-full max-w-sm border border-cyan-200/60 bg-slate-950 px-6 py-5 text-center font-mono text-cyan-100 shadow-[0_0_35px_rgba(103,232,249,0.28)]"
-              onSubmit={(event) => {
-                event.preventDefault();
-                submitHighScore();
-              }}
-            >
-              <h2 className="mb-2 text-2xl font-black uppercase tracking-widest text-white">Nuovo Record</h2>
-              <p className="mb-4 text-sm uppercase tracking-widest text-cyan-300">{pendingScore.score} Punti</p>
-              <input
-                autoFocus
-                aria-label="Iniziali high score"
-                className="mb-4 w-32 border border-cyan-300/60 bg-black px-3 py-2 text-center text-4xl font-black uppercase tracking-[0.3em] text-white outline-none focus:border-cyan-100"
-                inputMode="text"
-                maxLength={3}
-                value={initials}
-                onChange={(event) => {
-                  setInitials(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 3));
-                }}
-              />
-              <button
-                className="block w-full border border-cyan-300/70 bg-cyan-300 px-4 py-2 font-black uppercase tracking-widest text-slate-950 hover:bg-cyan-100"
-                type="submit"
-              >
-                Salva
-              </button>
-            </form>
+            
           </div>
-        )}
+        </div>
+
+        {/* Cabinet bottom with controls info */}
+        <div className="overflow-hidden rounded-b-2xl border-2 border-t-0 border-[#00ff41] bg-gradient-to-b from-black to-[#0a1a0a] px-4 py-3">
+          <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-1 font-mono text-[10px] uppercase tracking-widest text-[#00ff41]/50 sm:text-xs">
+            <span>↑↓←→ / WASD: Muovi</span>
+            <span>SPAZIO: Slow Mode (x2 punti)</span>
+            <span>P: Pausa</span>
+            <span>R: Torna al menu</span>
+          </div>
+        </div>
       </div>
     </main>
   );
