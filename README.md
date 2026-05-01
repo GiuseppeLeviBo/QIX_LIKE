@@ -41,6 +41,82 @@ Slow draw is slower, colors captured areas red, and awards double capture points
 - Autoplay demo/tester
 - Standalone single HTML build
 - PWA manifest, icon, and service worker assets
+- **7 Power-ups & Threats system** (see Power-ups section below)
+
+## Power-ups & Threats
+
+The playfield spawns various items during gameplay that provide powerful effects or dangerous hazards:
+
+### Power-ups (Beneficial)
+
+**🪙 COINS**
+- Most common drop
+- Grants **100 points** on pickup
+- Safe to collect, purely for score
+
+**🛡️ SHIELD**
+- Blue protective barrier
+- Protects the player from one collision with QIX or Sparx
+- Active for ~8 seconds
+- Can be stacked (pickup another to extend protection)
+
+**🚀 ROCKET** (Speed-Up)
+- Red/orange speed boost
+- Increases player movement speed by 40%
+- Active for ~6 seconds
+- Allows faster territory capture but requires better control
+
+**💚 1-UP** (Extra Life)
+- Green cross with upward arrow
+- Grants one additional life
+- Critical for surviving later levels
+
+**⬇️ SLOW**
+- Purple down-arrow icon
+- Slows player movement to 60% of normal speed
+- Active for ~8 seconds
+- Tactical penalty—can be avoided if detected early
+- Useful for precision drawing in tight spaces (or risky near enemies)
+
+### Threats (Hazardous)
+
+**⚡ FAST_MONSTER** (Enemy Threat)
+- Red spiky circle with white center
+- Accelerates all Sparx enemies by 40%
+- Active for ~6 seconds
+- Dangerous! Avoid or stay on captured territory
+
+**💣 BOMB** (Destructive Threat)
+- Black sphere with red/yellow fuse
+- Explodes if captured in a claimed area
+- **4-cell blast radius**: destroys claimed territory within the explosion zone
+- **Kills the player** if within 4 cells of the explosion (unless shielded)
+- Can also destroy an active shield
+- Creates strategic risk—careless territory claims near bombs cause losses
+
+## Item Mechanics
+
+- Items spawn randomly in unclaimed space at regular intervals
+- Maximum of 5 items can exist on-screen simultaneously
+- Each item has a ~30-second lifespan before disappearing
+- Pickup distance: 1.5 cells
+- Spawn weights (probability distribution):
+  - COINS: 30%
+  - SHIELD: 15%
+  - ROCKET: 15%
+  - 1-UP: 10%
+  - SLOW: 10%
+  - FAST_MONSTER: 10%
+  - BOMB: 10%
+
+## Scoring
+
+- **Captured area**: 10 points per cell (normal) / **20 points per cell (slow draw)**
+- **Trail bonus**: 5 points per trail cell
+- **Destroyed Sparx**: 2,500 + (500 × level) points per enemy
+- **Coins**: 100 points
+
+Slow draw (holding `Space` while drawing) doubles area score but slows movement—risk vs. reward!
 
 ## Development
 
