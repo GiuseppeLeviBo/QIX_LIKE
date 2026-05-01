@@ -1,13 +1,43 @@
 import { useEffect, useRef, useState } from "react";
+import {
+  TICK_MS, TARGET_PERCENT, START_LIVES, COLS, ROWS, CELL_PX as CELL,
+  ATTRACT_SPLASH_MS as SPLASH_DURATION, ATTRACT_DEMO_MS as DEMO_DURATION,
+  ATTRACT_SCORES_MS as SCORES_DURATION, LEVEL_COMPLETE_DURATION_MS as LEVEL_COMPLETE_DURATION,
+  BASE_QIX_SPEED, BASE_SPARK_SPEED, QIX_SPEED_PER_LEVEL, SPARK_SPEED_PER_LEVEL, MAX_SPARKS,
+  IDLE_NODRAW_THRESHOLD_TICKS, EXTRA_SPAWN_SPARKS_LIMIT,
+  ITEM_SPAWN_INTERVAL_TICKS, ITEM_SPAWN_CHANCE, MAX_ITEMS_ON_SCREEN, ITEM_LIFETIME_TICKS,
+  WEIGHT_SHIELD, WEIGHT_ROCKET, WEIGHT_ONE_UP, WEIGHT_SLOW,
+  WEIGHT_FAST_MONSTER, WEIGHT_BOMB,
+  SHIELD_DURATION_MS, ROCKET_DURATION_MS, SLOW_DURATION_MS, FAST_MONSTER_DURATION_MS,
+  ROCKET_SPEED_MULTIPLIER, SLOW_SPEED_MULTIPLIER, FAST_MONSTER_SPEED_MULTIPLIER,
+  POINTS_PER_AREA_CELL, POINTS_PER_TRAIL_CELL,
+  POINTS_PER_SPARK_DESTROYED_BASE, POINTS_PER_SPARK_DESTROYED_PER_LEVEL, POINTS_COINS_PICKUP,
+  SLOW_AREA_POINTS_MULTIPLIER,
+  BOMB_EXPLOSION_RADIUS_CELLS, BOMB_KILL_DISTANCE_CELLS, FUSE_ADVANCE_TICKS,
+  TOTAL_ITEM_WEIGHT,
+} from "./config/gameplayConstants";
 
 type Point = { x: number; y: number };
 type GameStatus = "ready" | "playing" | "paused" | "won" | "lost" | "enterName" | "splash" | "demo" | "attractScores";
-type Game = ReturnType<typeof createInitialGame>;
 
-const SPLASH_DURATION = 10000;
-const DEMO_DURATION = 20000;
-const SCORES_DURATION = 10000;
-const LEVEL_COMPLETE_DURATION = 5000;
+type FloatingText = {
+  x: number;
+  y: number;
+  text: string;
+  life: number;
+  color: string;
+};
+
+type ItemType = "COINS" | "SHIELD" | "ROCKET" | "1-UP" | "SLOW" | "FAST_MONSTER" | "BOMB";
+
+type Item = {
+  x: number;
+  y: number;
+  type: ItemType;
+  life: number;
+};
+
+type Game = ReturnType<typeof createInitialGame>;
 
 type HighScore = {
   initials: string;
@@ -43,16 +73,6 @@ function addHighScore(scores: HighScore[], newScore: HighScore): HighScore[] {
   saveHighScores(updated);
   return updated;
 }
-
-const COLS = 88;
-const ROWS = 60;
-const CELL = 10;
-const TICK_MS = 52;
-const TARGET_PERCENT = 75;
-const START_LIVES = 3;
-const MAX_SPARKS = 6;
-const BASE_QIX_SPEED = 0.65;
-const BASE_SPARK_SPEED = 0.45;
 
 type Spark = {
   x: number;
@@ -115,8 +135,7 @@ function areaPercent(grid: boolean[][]) {
 
 function resetQix(level: number) {
   const angle = Math.random() * Math.PI * 2;
-  // Make speed moderate but scaling
-  const speed = BASE_QIX_SPEED + level * 0.1;
+  const speed = BASE_QIX_SPEED + level * QIX_SPEED_PER_LEVEL;
   return {
     x: COLS * 0.5,
     y: ROWS * 0.5,
@@ -188,26 +207,18 @@ function buildBorderDistanceMap(claimed: boolean[][], target: Point) {
 
 function createSparks(level: number): Spark[] {
   const count = Math.min(2 + Math.floor(level / 2), MAX_SPARKS);
-  const speed = BASE_SPARK_SPEED + level * 0.12;
+  const speed = BASE_SPARK_SPEED + level * SPARK_SPEED_PER_LEVEL;
   const sparks: Spark[] = [];
   
-  // Place sparks on valid border cells, not the dead corner pixels.
-  const spawnPoints = [
-    { x: Math.floor(COLS * 0.25), y: 0, dx: 1, dy: 0 },
-    { x: COLS - 1, y: Math.floor(ROWS * 0.3), dx: 0, dy: 1 },
-    { x: Math.floor(COLS * 0.75), y: ROWS - 1, dx: -1, dy: 0 },
-    { x: 0, y: Math.floor(ROWS * 0.7), dx: 0, dy: -1 },
-    { x: Math.floor(COLS / 2), y: 0, dx: 1, dy: 0 },
-    { x: Math.floor(COLS / 2), y: ROWS - 1, dx: -1, dy: 0 },
-  ];
-
+  // All sparks spawn from the top-center origin (original QIX behaviour)
+  const topCenter = Math.floor(COLS / 2);
   for (let i = 0; i < count; i++) {
-    const pt = spawnPoints[i % spawnPoints.length];
+    const dx = i % 2 === 0 ? 1 : -1;
     sparks.push({
-      x: pt.x,
-      y: pt.y,
-      dx: pt.dx,
-      dy: pt.dy,
+      x: topCenter,
+      y: 0,
+      dx: dx,
+      dy: 0,
       speed,
       progress: 0,
       perimeterIndex: i * 10,
@@ -216,8 +227,8 @@ function createSparks(level: number): Spark[] {
   return sparks;
 }
 
-function updateSpark(spark: Spark, claimed: boolean[][], distanceMap: number[][] | null): Spark {
-  let progress = spark.progress + spark.speed;
+function updateSpark(spark: Spark, claimed: boolean[][], distanceMap: number[][] | null, monsterSpeedMultiplier = 1.0): Spark {
+  let progress = spark.progress + spark.speed * monsterSpeedMultiplier;
   let sx = spark.x;
   let sy = spark.y;
   let dx = spark.dx;
@@ -321,10 +332,32 @@ function createInitialGame(level = 1, carryOverScore = 0) {
     message: `Livello ${level} — Premi una freccia o WASD per iniziare`,
     fuseIndex: 0,
     fuseTimer: 0,
-    slowMode: false,
     slowClaimed: new Set<string>(),
-    slowTick: 0,
+    idleNoDrawTimer: 0,
+    floatingTexts: [] as FloatingText[],
+    items: [] as Item[],
+    shieldTimer: 0,
+    speedTimer: 0,
+    slowTimer: 0,
     spaceHeld: false,
+    slowDrawUsed: false,
+    playerMomentum: 0,
+    itemSpawnTimer: 0,
+    monsterSpeedTimer: 0,
+  };
+}
+
+function spawnSparkAtOrigin(level: number, existing: Spark[]): Spark {
+  const speed = BASE_SPARK_SPEED + level * SPARK_SPEED_PER_LEVEL;
+  const dx = existing.length % 2 === 0 ? 1 : -1;
+  return {
+    x: Math.floor(COLS / 2),
+    y: 0,
+    dx,
+    dy: 0,
+    speed,
+    progress: 0,
+    perimeterIndex: existing.length * 10,
   };
 }
 
@@ -332,50 +365,46 @@ function createInitialGame(level = 1, carryOverScore = 0) {
 
 function loseLife(game: Game, text: string): Game {
   const lives = game.lives - 1;
-  // Spawn explosion at player position
   spawnExplosion(game.player.x * CELL + CELL / 2, game.player.y * CELL + CELL / 2, "#00ffff", 30);
   spawnExplosion(game.player.x * CELL + CELL / 2, game.player.y * CELL + CELL / 2, "#ffff00", 15);
-  
+  const resetBase = {
+    player: { x: Math.floor(COLS / 2), y: ROWS - 1 },
+    dir: { x: 0, y: 0 },
+    drawing: false,
+    trail: [] as Point[],
+    trailSet: new Set<string>(),
+    fuseIndex: 0,
+    fuseTimer: 0,
+    slowClaimed: game.slowClaimed,
+    idleNoDrawTimer: 0,
+    items: [] as Item[],
+    shieldTimer: 0,
+    speedTimer: 0,
+    slowTimer: 0,
+    spaceHeld: false,
+    slowDrawUsed: false,
+    playerMomentum: 0,
+    monsterSpeedTimer: 0,
+  };
   if (lives <= 0) {
     return {
       ...game,
-      player: { x: Math.floor(COLS / 2), y: ROWS - 1 },
-      dir: { x: 0, y: 0 },
-      drawing: false,
-      trail: [],
-      trailSet: new Set<string>(),
+      ...resetBase,
       qix: resetQix(game.level),
       sparks: createSparks(game.level),
       lives: 0,
       status: "enterName",
-      message: "GAME OVER — Inserisci le tue iniziali",
-      fuseIndex: 0,
-      fuseTimer: 0,
-      slowMode: false,
-      slowClaimed: new Set<string>(),
-      slowTick: 0,
-      spaceHeld: false,
+      message: "GAME OVER",
     };
   }
-  
   return {
     ...game,
-    player: { x: Math.floor(COLS / 2), y: ROWS - 1 },
-    dir: { x: 0, y: 0 },
-    drawing: false,
-    trail: [],
-    trailSet: new Set<string>(),
+    ...resetBase,
     qix: resetQix(game.level),
     sparks: createSparks(game.level),
     lives,
     status: "paused",
-    message: `${text} Premi P per pausa / SPAZIO per slow mode`,
-    fuseIndex: 0,
-    fuseTimer: 0,
-    slowMode: false,
-    slowClaimed: game.slowClaimed,
-    slowTick: 0,
-    spaceHeld: false,
+    message: text,
   };
 }
 
@@ -428,15 +457,65 @@ function claimClosedArea(game: Game): Game {
     spawnExplosion(spark.x * CELL + CELL / 2, spark.y * CELL + CELL / 2, "#ff8c00", 26);
     spawnExplosion(spark.x * CELL + CELL / 2, spark.y * CELL + CELL / 2, "#ffff00", 14);
   }
+  
+  // Respawn one new spark at the origin point (top-center) for each destroyed spark
+  const respawnedSparks: Spark[] = [];
+  const newFloatingTexts = [...game.floatingTexts];
+  for (const spark of destroyedSparks) {
+    respawnedSparks.push(spawnSparkAtOrigin(game.level, [...survivingSparks, ...respawnedSparks]));
+    newFloatingTexts.push({
+      x: spark.x * CELL + CELL / 2,
+      y: spark.y * CELL + CELL / 2,
+      text: `+${2500 + game.level * 500}`,
+      life: 60,
+      color: "#ffcc00"
+    });
+  }
+  const allSparks = [...survivingSparks, ...respawnedSparks];
+
+  // ── Items capture / BOMB explosion in area logic ──
+  const survivingItems: Item[] = [];
+  let bombTriggered = false;
+  for (const item of game.items) {
+    if (item.type === "BOMB" && claimed[item.y]?.[item.x] && !game.claimed[item.y]?.[item.x]) {
+      spawnExplosion(item.x * CELL + CELL / 2, item.y * CELL + CELL / 2, "#ff0000", 40);
+      newFloatingTexts.push({
+        x: item.x * CELL + CELL / 2, y: item.y * CELL + CELL / 2,
+        text: "BOOM!", life: 30, color: "#ff0000"
+      });
+      // Damage surrounding claimed area
+      for (let dy = -4; dy <= 4; dy++) {
+        for (let dx = -4; dx <= 4; dx++) {
+          const nx = item.x + dx;
+          const ny = item.y + dy;
+          if (nx > 0 && nx < COLS - 1 && ny > 0 && ny < ROWS - 1) {
+            if (Math.hypot(dx, dy) <= 4) {
+              claimed[ny][nx] = false;
+            }
+          }
+        }
+      }
+      if (Math.hypot(game.player.x - item.x, game.player.y - item.y) <= 4) {
+        bombTriggered = true;
+      }
+    } else {
+      survivingItems.push(item);
+    }
+  }
+
+  if (bombTriggered && game.shieldTimer <= 0) {
+    return loseLife(game, "BOMB!");
+  }
 
   const percent = areaPercent(claimed);
-  const sparkBonus = destroyedSparks.length * (2500 + game.level * 500);
-  const areaPoints = gained * 12 + game.trail.length * 5;
-  const score = game.score + (game.slowMode ? areaPoints * 2 : areaPoints) + sparkBonus;
+  const sparkBonus = destroyedSparks.length * (POINTS_PER_SPARK_DESTROYED_BASE + game.level * POINTS_PER_SPARK_DESTROYED_PER_LEVEL);
+  const areaPoints = gained * POINTS_PER_AREA_CELL + game.trail.length * POINTS_PER_TRAIL_CELL;
+  // Only voluntary Space slow draw grants the 2x area score bonus.
+  const score = game.score + (game.slowDrawUsed ? areaPoints * SLOW_AREA_POINTS_MULTIPLIER : areaPoints) + sparkBonus;
   
-  // Track slow-claimed cells
+  // Track slow-claimed cells for visual rendering
   const newSlowClaimed = new Set(game.slowClaimed);
-  if (game.slowMode) {
+  if (game.slowDrawUsed) {
     for (let y = 1; y < ROWS - 1; y += 1) {
       for (let x = 1; x < COLS - 1; x += 1) {
         if (!game.claimed[y][x] && claimed[y][x]) {
@@ -467,16 +546,23 @@ function claimClosedArea(game: Game): Game {
     claimed,
     trail: [],
     trailSet: new Set<string>(),
-    sparks: survivingSparks,
+    sparks: allSparks,
     drawing: false,
     percent,
     score,
-    slowMode: false,
     slowClaimed: newSlowClaimed,
-    slowTick: 0,
-    spaceHeld: game.spaceHeld,
     status: won ? "won" : game.status,
     message: won ? "Livello Completato" : "",
+    idleNoDrawTimer: 0,
+    floatingTexts: newFloatingTexts,
+    items: survivingItems,
+    shieldTimer: game.shieldTimer,
+    speedTimer: game.speedTimer,
+    slowTimer: game.slowTimer,
+    spaceHeld: game.spaceHeld,
+    slowDrawUsed: false,
+    itemSpawnTimer: game.itemSpawnTimer,
+    monsterSpeedTimer: game.monsterSpeedTimer,
   };
 }
 
@@ -493,7 +579,10 @@ function stepGame(game: Game): Game {
 
   // ── STRICT QIX MOVEMENT ──
   // Make multiple small steps to ensure QIX never enters claimed territory
-  const speed = BASE_QIX_SPEED + game.level * 0.1;
+  let qixSpeed = BASE_QIX_SPEED + game.level * 0.1;
+  if (game.monsterSpeedTimer > 0) {
+    qixSpeed *= 1.4; // 40% faster for FAST_MONSTER
+  }
   const steps = 5;
   let qixHitTrailDuringMove = false;
   for (let s = 0; s < steps; s++) {
@@ -530,8 +619,8 @@ function stepGame(game: Game): Game {
       // Normalize speed
       const mag = Math.sqrt(nextQix.vx * nextQix.vx + nextQix.vy * nextQix.vy);
       if (mag > 0) {
-        nextQix.vx = (nextQix.vx / mag) * speed;
-        nextQix.vy = (nextQix.vy / mag) * speed;
+        nextQix.vx = (nextQix.vx / mag) * qixSpeed;
+        nextQix.vy = (nextQix.vy / mag) * qixSpeed;
       }
       break; // Re-evaluate on next frame
     } else {
@@ -540,16 +629,174 @@ function stepGame(game: Game): Game {
     }
   }
 
+  // ── UPDATE TIMERS ──
+  const shieldTimer = Math.max(0, game.shieldTimer - 1);
+  const speedTimer = Math.max(0, game.speedTimer - 1);
+  const slowTimer = Math.max(0, (game.slowTimer ?? 0) - 1);
+  const monsterSpeedTimer = Math.max(0, game.monsterSpeedTimer - 1);
+
+  // ── ITEMS (POWERUPS + THREATS) LOGIC: spawn, update & expire ──
+  let itemSpawnTimer = (game.itemSpawnTimer ?? 0) + 1;
+  const currentItems = [...(game.items || [])]
+    .map(item => ({ ...item, life: item.life - 1 }))
+    .filter(item => item.life > 0);
+
+  // Spawn new item with proper weights and chance
+  if (itemSpawnTimer >= ITEM_SPAWN_INTERVAL_TICKS) {
+    itemSpawnTimer = 0;
+    if (Math.random() < ITEM_SPAWN_CHANCE && currentItems.length < MAX_ITEMS_ON_SCREEN) {
+      // Pick random empty cell
+      let emptyCells: Point[] = [];
+      for (let y = 1; y < ROWS - 1; y++) {
+        for (let x = 1; x < COLS - 1; x++) {
+          if (!game.claimed[y][x]) emptyCells.push({ x, y });
+        }
+      }
+      if (emptyCells.length > 0) {
+        const pickedCell = emptyCells[Math.floor(Math.random() * emptyCells.length)];
+        
+        // Distribution of types using true exact weights (TOTAL_ITEM_WEIGHT):
+        let r = Math.random() * TOTAL_ITEM_WEIGHT;
+        let type: ItemType = "COINS";
+
+        if (r < WEIGHT_ONE_UP) {
+          type = "1-UP";
+        } else if (r < WEIGHT_ONE_UP + WEIGHT_BOMB) {
+          type = "BOMB";
+        } else if (r < WEIGHT_ONE_UP + WEIGHT_BOMB + WEIGHT_SHIELD) {
+          type = "SHIELD";
+        } else if (r < WEIGHT_ONE_UP + WEIGHT_BOMB + WEIGHT_SHIELD + WEIGHT_ROCKET) {
+          type = "ROCKET";
+        } else if (r < WEIGHT_ONE_UP + WEIGHT_BOMB + WEIGHT_SHIELD + WEIGHT_ROCKET + WEIGHT_SLOW) {
+          type = "SLOW";
+        } else if (r < WEIGHT_ONE_UP + WEIGHT_BOMB + WEIGHT_SHIELD + WEIGHT_ROCKET + WEIGHT_SLOW + WEIGHT_FAST_MONSTER) {
+          type = "FAST_MONSTER";
+        } else {
+          type = "COINS";
+        }
+
+        currentItems.push({
+          x: pickedCell.x,
+          y: pickedCell.y,
+          type,
+          life: ITEM_LIFETIME_TICKS,
+        });
+      }
+    }
+  }
+
   // ── UPDATE SPARKS ──
   const sparkTarget = !game.drawing && isBorderCell(game.player.x, game.player.y, game.claimed) ? game.player : null;
   const distanceMap = sparkTarget ? buildBorderDistanceMap(game.claimed, sparkTarget) : null;
-  const updatedSparks = game.sparks.map((spark) => updateSpark(spark, game.claimed, distanceMap));
+  const monsterSpeedMultiplier = game.monsterSpeedTimer > 0 ? FAST_MONSTER_SPEED_MULTIPLIER : 1.0;
+  let updatedSparks = game.sparks.map((spark) => updateSpark(spark, game.claimed, distanceMap, monsterSpeedMultiplier));
+
+  // ── IDLE NO-DRAW TIMER ──
+  let nextIdleTimer = (game.idleNoDrawTimer ?? 0);
+  if (game.drawing) {
+    nextIdleTimer = 0;
+  } else {
+    nextIdleTimer += 1;
+    if (nextIdleTimer >= IDLE_NODRAW_THRESHOLD_TICKS && updatedSparks.length < MAX_SPARKS + EXTRA_SPAWN_SPARKS_LIMIT) {
+      updatedSparks = [...updatedSparks, spawnSparkAtOrigin(game.level, updatedSparks)];
+      spawnExplosion((COLS / 2) * CELL, 0, "#ff3700", 16);
+      nextIdleTimer = 0;
+    }
+  }
+
+  // ── UPDATE FLOATING TEXTS ──
+  const updatedFloatingTexts = game.floatingTexts
+    .map(ft => ({ ...ft, life: ft.life - 1, y: ft.y - 0.2 }))
+    .filter(ft => ft.life > 0);
 
   let updated: Game = {
     ...game,
     qix: nextQix,
     sparks: updatedSparks,
+    idleNoDrawTimer: nextIdleTimer,
+    floatingTexts: updatedFloatingTexts,
+    items: currentItems,
+    shieldTimer,
+    speedTimer,
+    slowTimer,
+    itemSpawnTimer,
+    monsterSpeedTimer,
   };
+
+  // ── ITEMS COLLECTION ──
+  let collectedItems: Item[] = [];
+  const remainingItems = currentItems.filter((item) => {
+    const isCollected = Math.hypot(updated.player.x - item.x, updated.player.y - item.y) <= 1.5;
+    if (isCollected) {
+      collectedItems.push(item);
+      return false;
+    }
+    return true;
+  });
+
+  for (const item of collectedItems) {
+    if (item.type === "COINS") {
+      updated.score += POINTS_COINS_PICKUP;
+      updated.floatingTexts.push({
+        x: item.x * CELL + CELL / 2, y: item.y * CELL + CELL / 2,
+        text: `+${POINTS_COINS_PICKUP}`, life: 50, color: "#ffea00"
+      });
+    } else if (item.type === "SHIELD") {
+      updated.shieldTimer = Math.ceil(SHIELD_DURATION_MS / TICK_MS);
+      updated.floatingTexts.push({
+        x: item.x * CELL + CELL / 2, y: item.y * CELL + CELL / 2,
+        text: "SHIELD!", life: 50, color: "#00ffff"
+      });
+    } else if (item.type === "ROCKET") {
+      updated.speedTimer = Math.ceil(ROCKET_DURATION_MS / TICK_MS);
+      updated.floatingTexts.push({
+        x: item.x * CELL + CELL / 2, y: item.y * CELL + CELL / 2,
+        text: "SPEED UP!", life: 50, color: "#ff5500"
+      });
+    } else if (item.type === "1-UP") {
+      updated.lives += 1;
+      updated.floatingTexts.push({
+        x: item.x * CELL + CELL / 2, y: item.y * CELL + CELL / 2,
+        text: "1-UP!", life: 50, color: "#00ff66"
+      });
+    } else if (item.type === "SLOW") {
+      updated.slowTimer = Math.ceil(SLOW_DURATION_MS / TICK_MS);
+      updated.floatingTexts.push({
+        x: item.x * CELL + CELL / 2, y: item.y * CELL + CELL / 2,
+        text: "SLOW!", life: 50, color: "#ff8800"
+      });
+    } else if (item.type === "FAST_MONSTER") {
+      updated.monsterSpeedTimer = Math.ceil(FAST_MONSTER_DURATION_MS / TICK_MS);
+      updated.floatingTexts.push({
+        x: item.x * CELL + CELL / 2, y: item.y * CELL + CELL / 2,
+        text: "FAST MONSTERS!", life: 50, color: "#ff0000"
+      });
+    } else if (item.type === "BOMB") {
+      spawnExplosion(item.x * CELL + CELL / 2, item.y * CELL + CELL / 2, "#ff0000", 40);
+      updated.floatingTexts.push({
+        x: item.x * CELL + CELL / 2, y: item.y * CELL + CELL / 2,
+        text: "BOOM!", life: 30, color: "#ff0000"
+      });
+      // Damage surrounding claimed area
+      for (let dy = -BOMB_EXPLOSION_RADIUS_CELLS; dy <= BOMB_EXPLOSION_RADIUS_CELLS; dy++) {
+        for (let dx = -BOMB_EXPLOSION_RADIUS_CELLS; dx <= BOMB_EXPLOSION_RADIUS_CELLS; dx++) {
+          const nx = item.x + dx;
+          const ny = item.y + dy;
+          if (nx > 0 && nx < COLS - 1 && ny > 0 && ny < ROWS - 1) {
+            if (Math.hypot(dx, dy) <= BOMB_EXPLOSION_RADIUS_CELLS) {
+              updated.claimed[ny][nx] = false;
+            }
+          }
+        }
+      }
+      // If player is close, die
+      if (Math.hypot(updated.player.x - item.x, updated.player.y - item.y) <= BOMB_KILL_DISTANCE_CELLS) {
+        return loseLife(updated, "BOMB!");
+      }
+    }
+    spawnExplosion(item.x * CELL + CELL / 2, item.y * CELL + CELL / 2, "#ff8800", 12);
+  }
+  updated.items = remainingItems;
 
   // ── CHECK TRAIL COLLISIONS ──
   // Check if QIX overlaps with any cell in the trail (distance-based collision)
@@ -570,7 +817,7 @@ function stepGame(game: Game): Game {
     const newFuseTimer = updated.fuseTimer + 1;
     let newFuseIndex = updated.fuseIndex;
     
-    if (newFuseTimer >= 3) {
+    if (newFuseTimer >= FUSE_ADVANCE_TICKS) {
       newFuseIndex = updated.fuseIndex + 1;
       updated = { ...updated, fuseTimer: 0, fuseIndex: newFuseIndex };
       
@@ -595,68 +842,87 @@ function stepGame(game: Game): Game {
     updated = { ...updated, fuseIndex: 0, fuseTimer: 0 };
   }
 
-  if (dir.x === 0 && dir.y === 0) return updated;
-
-  const player = updated.player;
-  const target = {
-    x: clamp(player.x + dir.x, 0, COLS - 1),
-    y: clamp(player.y + dir.y, 0, ROWS - 1),
-  };
-
-  if (target.x === player.x && target.y === player.y) return updated;
-
-  const targetKey = key(target.x, target.y);
-  const targetClaimed = updated.claimed[target.y][target.x];
-  const targetTrail = updated.trailSet.has(targetKey);
-
-  // ── SLOW MODE: when Space is held while drawing, move at half speed ──
-  if (updated.drawing && updated.slowMode) {
-    const newSlowTick = updated.slowTick + 1;
-    if (newSlowTick % 2 !== 0) {
-      // Skip movement this tick (half speed)
-      return { ...updated, slowTick: newSlowTick };
+  // ── Early spark check on border (even when not moving) ──
+  if (!updated.drawing && updated.shieldTimer <= 0) {
+    for (const spark of updated.sparks) {
+      if (spark.x === updated.player.x && spark.y === updated.player.y) {
+        return loseLife(updated, "Uno Sparx ti ha raggiunto sul bordo.");
+      }
     }
-    updated = { ...updated, slowTick: newSlowTick };
   }
 
-  if (updated.drawing) {
-    if (targetTrail) return loseLife(updated, "Hai incrociato la tua scia.");
-    if (targetClaimed) {
-      updated = { ...updated, player: target };
-      return claimClosedArea(updated);
-    }
-    const trailSet = new Set(updated.trailSet);
-    trailSet.add(targetKey);
-    updated = { ...updated, player: target, trail: [...updated.trail, target], trailSet };
-  } else if (targetClaimed) {
-    updated = { ...updated, player: target };
-  } else {
-    // Starting to draw: check if Space is held for slow mode
-    const startSlow = updated.spaceHeld;
-    const trailSet = new Set<string>([targetKey]);
-    updated = { ...updated, drawing: true, player: target, trail: [target], trailSet, slowMode: startSlow, slowTick: 0 };
+  // ── SLOW/ROCKET: speed modifiers for player movement ──
+  let moveMultiplier = 1.0;
+  if (updated.slowTimer > 0) {
+    moveMultiplier *= SLOW_SPEED_MULTIPLIER;
   }
-
-  // Hit between player and QIX
-  const playerHitQix = Math.abs(nextQix.x - updated.player.x) < 1.6 && Math.abs(nextQix.y - updated.player.y) < 1.6;
-  if (playerHitQix) {
-    return loseLife(updated, "Il QIX ti ha colpito.");
+  if (updated.drawing && updated.spaceHeld) {
+    moveMultiplier *= SLOW_SPEED_MULTIPLIER;
+    updated = { ...updated, slowDrawUsed: true };
   }
+  if (updated.speedTimer > 0) {
+    moveMultiplier *= ROCKET_SPEED_MULTIPLIER;
+  }
+  
+  updated = { ...updated, playerMomentum: (updated.playerMomentum ?? 0) + moveMultiplier };
+  const stepsToMove = Math.floor(updated.playerMomentum);
+  if (stepsToMove < 1) {
+    return updated; // Momentum not enough yet for 1 step
+  }
+  updated = { ...updated, playerMomentum: updated.playerMomentum - stepsToMove };
 
-  // Hit between SPARKS and player or trail
-  for (const spark of updated.sparks) {
-    const isPlayerHitOnBorder = spark.x === updated.player.x && spark.y === updated.player.y && !updated.drawing;
-    if (isPlayerHitOnBorder) {
-      return loseLife(updated, "Uno Sparx ti ha raggiunto sul bordo.");
+  for (let s = 0; s < stepsToMove; s++) {
+    const player = updated.player;
+    const target = {
+      x: clamp(player.x + dir.x, 0, COLS - 1),
+      y: clamp(player.y + dir.y, 0, ROWS - 1),
+    };
+
+    if (target.x === player.x && target.y === player.y) {
+      break;
     }
+
+    const targetKey = key(target.x, target.y);
+    const targetClaimed = updated.claimed[target.y][target.x];
+    const targetTrail = updated.trailSet.has(targetKey);
 
     if (updated.drawing) {
-      // Check if Spark is adjacent to or on any cell in the trail
-      const isSparkHittingTrail = updated.trail.some(
-        (pt) => Math.abs(spark.x - pt.x) <= 1 && Math.abs(spark.y - pt.y) <= 1
-      );
-      if (isSparkHittingTrail) {
-        return loseLife(updated, "Uno Sparx ha colpito la tua scia.");
+      if (targetTrail) return loseLife(updated, "Hai incrociato la tua scia.");
+      if (targetClaimed) {
+        updated = { ...updated, player: target };
+        return claimClosedArea(updated);
+      }
+      const trailSet = new Set(updated.trailSet);
+      trailSet.add(targetKey);
+      updated = { ...updated, player: target, trail: [...updated.trail, target], trailSet };
+    } else if (targetClaimed) {
+      updated = { ...updated, player: target };
+    } else {
+      const trailSet = new Set<string>([targetKey]);
+    updated = { ...updated, drawing: true, player: target, trail: [target], trailSet, playerMomentum: 0, slowDrawUsed: updated.spaceHeld };
+    }
+
+    // Hit between player and QIX/Sparks
+    if (updated.shieldTimer <= 0) {
+      const playerHitQix = Math.abs(nextQix.x - updated.player.x) < 1.6 && Math.abs(nextQix.y - updated.player.y) < 1.6;
+      if (playerHitQix) {
+        return loseLife(updated, "Il QIX ti ha colpito.");
+      }
+
+      for (const spark of updated.sparks) {
+        const isPlayerHitOnBorder = spark.x === updated.player.x && spark.y === updated.player.y && !updated.drawing;
+        if (isPlayerHitOnBorder) {
+          return loseLife(updated, "Uno Sparx ti ha raggiunto sul bordo.");
+        }
+
+        if (updated.drawing) {
+          const isSparkHittingTrail = updated.trail.some(
+            (pt) => Math.abs(spark.x - pt.x) <= 1 && Math.abs(spark.y - pt.y) <= 1
+          );
+          if (isSparkHittingTrail) {
+            return loseLife(updated, "Uno Sparx ha colpito la tua scia.");
+          }
+        }
       }
     }
   }
@@ -959,6 +1225,129 @@ function drawGame(ctx: CanvasRenderingContext2D, game: Game) {
   ctx.strokeRect(1, 1, w - 2, h - 2);
   ctx.shadowBlur = 0;
 
+  // ── Items (Power-ups & Threats - retro 80s icons) ──
+  for (const item of game.items) {
+    const px = item.x * CELL + CELL / 2;
+    const py = item.y * CELL + CELL / 2;
+    
+    ctx.save();
+    ctx.translate(px, py);
+    
+    // Pulsing effect
+    const pulse = Math.sin(frameCount * 0.1) * 0.2 + 0.8;
+    
+    if (item.type === "COINS") {
+      // Golden coin with glow
+      ctx.shadowColor = "#ffea00";
+      ctx.shadowBlur = 10 * pulse;
+      ctx.fillStyle = "#ffea00";
+      ctx.beginPath();
+      ctx.arc(0, 0, CELL * 0.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#fff7b2";
+      ctx.beginPath();
+      ctx.arc(0, 0, CELL * 0.25, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (item.type === "SHIELD") {
+      // Blue shield
+      ctx.shadowColor = "#00ffff";
+      ctx.shadowBlur = 10 * pulse;
+      ctx.fillStyle = "#00ffff";
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, -CELL * 0.5);
+      ctx.lineTo(CELL * 0.4, -CELL * 0.2);
+      ctx.lineTo(CELL * 0.4, CELL * 0.3);
+      ctx.lineTo(0, CELL * 0.5);
+      ctx.lineTo(-CELL * 0.4, CELL * 0.3);
+      ctx.lineTo(-CELL * 0.4, -CELL * 0.2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    } else if (item.type === "ROCKET") {
+      // Red/orange rocket
+      ctx.shadowColor = "#ff5500";
+      ctx.shadowBlur = 10 * pulse;
+      ctx.fillStyle = "#ff5500";
+      // Body
+      ctx.fillRect(-CELL * 0.15, -CELL * 0.3, CELL * 0.3, CELL * 0.5);
+      // Nose
+      ctx.beginPath();
+      ctx.moveTo(0, -CELL * 0.5);
+      ctx.lineTo(-CELL * 0.15, -CELL * 0.3);
+      ctx.lineTo(CELL * 0.15, -CELL * 0.3);
+      ctx.closePath();
+      ctx.fill();
+      // Fins
+      ctx.fillStyle = "#ffaa00";
+      ctx.beginPath();
+      ctx.moveTo(-CELL * 0.15, CELL * 0.2);
+      ctx.lineTo(-CELL * 0.4, CELL * 0.4);
+      ctx.lineTo(-CELL * 0.15, CELL * 0.4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(CELL * 0.15, CELL * 0.2);
+      ctx.lineTo(CELL * 0.4, CELL * 0.4);
+      ctx.lineTo(CELL * 0.15, CELL * 0.4);
+      ctx.closePath();
+      ctx.fill();
+    } else if (item.type === "1-UP") {
+      // Green 1-UP (heart or cross)
+      ctx.shadowColor = "#00ff66";
+      ctx.shadowBlur = 10 * pulse;
+      ctx.fillStyle = "#00ff66";
+      // Simple cross or "1" with up arrow
+      ctx.fillRect(-CELL * 0.1, -CELL * 0.4, CELL * 0.2, CELL * 0.8);
+      ctx.fillRect(-CELL * 0.3, -CELL * 0.1, CELL * 0.6, CELL * 0.2);
+      // Arrow up
+      ctx.beginPath();
+      ctx.moveTo(0, -CELL * 0.6);
+      ctx.lineTo(-CELL * 0.2, -CELL * 0.4);
+      ctx.lineTo(CELL * 0.2, -CELL * 0.4);
+      ctx.closePath();
+      ctx.fill();
+    } else if (item.type === "SLOW") {
+      // Purple slow icon (down arrow)
+      ctx.shadowColor = "#aa00ff";
+      ctx.shadowBlur = 10 * pulse;
+      ctx.fillStyle = "#aa00ff";
+      ctx.beginPath();
+      ctx.moveTo(0, CELL * 0.4);
+      ctx.lineTo(-CELL * 0.3, -CELL * 0.3);
+      ctx.lineTo(CELL * 0.3, -CELL * 0.3);
+      ctx.closePath();
+      ctx.fill();
+    } else if (item.type === "FAST_MONSTER") {
+      // Red fast monster (spiky circle)
+      ctx.shadowColor = "#ff0000";
+      ctx.shadowBlur = 10 * pulse;
+      ctx.fillStyle = "#ff0000";
+      ctx.beginPath();
+      ctx.arc(0, 0, CELL * 0.35, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc(0, 0, CELL * 0.15, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (item.type === "BOMB") {
+      // Black bomb with fuse
+      ctx.shadowColor = "#000000";
+      ctx.shadowBlur = 8 * pulse;
+      ctx.fillStyle = "#222222";
+      ctx.beginPath();
+      ctx.arc(0, 0, CELL * 0.35, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#ff0000";
+      ctx.fillRect(-CELL * 0.1, -CELL * 0.45, CELL * 0.2, CELL * 0.2);
+      ctx.fillStyle = "#ffff00";
+      ctx.fillRect(-CELL * 0.05, -CELL * 0.6, CELL * 0.1, CELL * 0.2);
+    }
+    
+    ctx.restore();
+  }
+
   // ── Trail with gradient, glow, and burning fuse ──
   const trailLen = game.trail.length;
   for (let i = 0; i < trailLen; i++) {
@@ -978,8 +1367,8 @@ function drawGame(ctx: CanvasRenderingContext2D, game: Game) {
       ctx.shadowBlur = 12;
       ctx.fillStyle = fuseColor;
       ctx.fillRect(p.x * CELL + 1, p.y * CELL + 1, CELL - 2, CELL - 2);
-    } else if (game.slowMode) {
-      // Slow mode trail: red/orange glow
+    } else if (game.slowDrawUsed || (game.drawing && game.spaceHeld)) {
+      // Voluntary Space slow-draw trail: red/orange glow
       const alpha = 0.4 + t * 0.6;
       ctx.shadowColor = "#ff3300";
       ctx.shadowBlur = 10 + t * 8;
@@ -1096,7 +1485,7 @@ function drawGame(ctx: CanvasRenderingContext2D, game: Game) {
   // ── Player: arcade-style ship ──
   const px = game.player.x * CELL + CELL / 2;
   const py = game.player.y * CELL + CELL / 2;
-  const playerColor = game.drawing ? (game.slowMode ? "#ff3300" : "#ffff00") : "#00ffff";
+  const playerColor = game.drawing ? (game.slowDrawUsed || game.spaceHeld ? "#ff3300" : "#ffff00") : "#00ffff";
   const playerPulse = Math.sin(frameCount * 0.15) * 0.2 + 0.8;
 
   // Glow aura
@@ -1146,6 +1535,20 @@ function drawGame(ctx: CanvasRenderingContext2D, game: Game) {
   updateParticles();
   drawParticles(ctx);
 
+  // ── Floating Texts ──
+  ctx.save();
+  ctx.font = "bold 12px 'Press Start 2P'";
+  ctx.textAlign = "center";
+  for (const ft of game.floatingTexts) {
+    const alpha = Math.min(1, ft.life / 20);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = ft.color;
+    ctx.shadowColor = "rgba(0,0,0,0.8)";
+    ctx.shadowBlur = 4;
+    ctx.fillText(ft.text, ft.x, ft.y);
+  }
+  ctx.restore();
+
   // ── CRT Scanlines overlay ──
   ctx.fillStyle = "rgba(0,0,0,0.08)";
   for (let y = 0; y < h; y += 3) {
@@ -1169,6 +1572,28 @@ function drawGame(ctx: CanvasRenderingContext2D, game: Game) {
   ctx.fillText(`SCORE ${game.score.toString().padStart(7, "0")}`, w / 2, 16);
   ctx.textAlign = "right";
   ctx.fillText(`${game.percent}%/${TARGET_PERCENT}%`, w - 8, 16);
+
+  // Effect countdown timers (visible when effects are active)
+  ctx.save();
+  ctx.font = "bold 10px 'Press Start 2P'";
+  ctx.textAlign = "right";
+  let offsetTimer = 32;
+  if (game.shieldTimer > 0) {
+    ctx.fillStyle = "#00ffff";
+    ctx.fillText(`SHIELD: ${(game.shieldTimer * TICK_MS / 1000).toFixed(1)}s`, w - 8, offsetTimer);
+    offsetTimer += 14;
+  }
+  if (game.speedTimer > 0) {
+    ctx.fillStyle = "#ff5500";
+    ctx.fillText(`SPEED UP: ${(game.speedTimer * TICK_MS / 1000).toFixed(1)}s`, w - 8, offsetTimer);
+    offsetTimer += 14;
+  }
+  if (game.monsterSpeedTimer > 0) {
+    ctx.fillStyle = "#ff0000";
+    ctx.fillText(`FAST MONSTERS: ${(game.monsterSpeedTimer * TICK_MS / 1000).toFixed(1)}s`, w - 8, offsetTimer);
+    offsetTimer += 14;
+  }
+  ctx.restore();
 
   // Lives as small ship icons
   for (let i = 0; i < game.lives; i++) {
@@ -1333,9 +1758,29 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, []);
 
-  // ── Keyboard handler ──
+  // ── Input Helper: Recompute direction from still-pressed keys ──
   const keysPressed = useRef<Set<string>>(new Set());
 
+  const recomputeDirection = () => {
+    let newDir = { x: 0, y: 0 };
+    for (const code of keysPressed.current) {
+      const d = DIRS[code];
+      if (d) {
+        newDir = { x: newDir.x + d.x, y: newDir.y + d.y };
+      }
+    }
+    // Normalize cardinal
+    if (newDir.x !== 0) newDir.x = newDir.x > 0 ? 1 : -1;
+    if (newDir.y !== 0) newDir.y = newDir.y > 0 ? 1 : -1;
+    // Only allow cardinal movement
+    if (newDir.x !== 0 && newDir.y !== 0) {
+      newDir = { x: 0, y: 0 };
+    }
+    gameRef.current = { ...gameRef.current, dir: newDir };
+    sync();
+  };
+
+  // ── Keyboard handler ──
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       // Attract mode: any key starts game
@@ -1349,7 +1794,7 @@ export default function App() {
 
       // Handle initials entry
       if (hud.status === "enterName") {
-        if (event.code === "Enter" && initials.length === 3) {
+        if (event.code === "Enter") {
           submitScore();
           return;
         }
@@ -1357,8 +1802,23 @@ export default function App() {
           setInitials((prev) => prev.slice(0, -1));
           return;
         }
-        if (event.key.length === 1 && /[a-zA-Z]/.test(event.key) && initials.length < 3) {
-          setInitials((prev) => prev + event.key.toUpperCase());
+        if (event.key.length === 1 && /[a-zA-Z]/.test(event.key)) {
+          setInitials((prev) => {
+            const next = prev.length >= 3 ? event.key.toUpperCase() : prev + event.key.toUpperCase();
+            if (next.length === 3) {
+              // Auto-submit after 3 letters in keyboard mode
+              setTimeout(() => {
+                const updated = addHighScore(loadHighScores(), {
+                  initials: next,
+                  score: gameRef.current.score,
+                  level: gameRef.current.level,
+                });
+                setHighScores(updated);
+                returnToAttract();
+              }, 200);
+            }
+            return next;
+          });
           return;
         }
         return;
@@ -1372,7 +1832,6 @@ export default function App() {
 
       if (event.code === "Space") {
         event.preventDefault();
-        // Space = slow mode modifier while playing
         gameRef.current = { ...gameRef.current, spaceHeld: true };
         sync();
         return;
@@ -1405,32 +1864,14 @@ export default function App() {
     };
 
     const onKeyUp = (event: KeyboardEvent) => {
-      keysPressed.current.delete(event.code);
-      
-      // Clear spaceHeld when Space is released
       if (event.code === "Space") {
+        event.preventDefault();
         gameRef.current = { ...gameRef.current, spaceHeld: false };
         sync();
         return;
       }
-      
-      // Recompute direction from still-pressed keys
-      let newDir = { x: 0, y: 0 };
-      for (const code of keysPressed.current) {
-        const d = DIRS[code];
-        if (d) {
-          newDir = { x: newDir.x + d.x, y: newDir.y + d.y };
-        }
-      }
-      // Normalize cardinal
-      if (newDir.x !== 0) newDir.x = newDir.x > 0 ? 1 : -1;
-      if (newDir.y !== 0) newDir.y = newDir.y > 0 ? 1 : -1;
-      // Only allow cardinal movement
-      if (newDir.x !== 0 && newDir.y !== 0) {
-        // Keep the last-pressed direction
-        newDir = { x: 0, y: 0 };
-      }
-      gameRef.current = { ...gameRef.current, dir: newDir };
+      keysPressed.current.delete(event.code);
+      recomputeDirection();
     };
 
     window.addEventListener("keydown", onKeyDown);
@@ -1444,56 +1885,58 @@ export default function App() {
   const statusText = hud.status === "won" ? "VITTORIA!" : hud.status === "lost" ? "GAME OVER" : hud.status === "paused" ? "PAUSA" : hud.status === "enterName" ? "INSERISCI INIZIALI" : hud.status === "ready" ? "PRONTO" : "IN GIOCO";
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-black p-2 sm:p-4">
+    <main className="arcade-root flex items-stretch justify-center bg-black">
       {/* Arcade Cabinet Frame */}
-      <div className="relative w-full max-w-5xl">
+      <div className={`arcade-shell relative flex w-full flex-col overflow-hidden ${!isAttract ? "p-0" : "max-w-5xl mx-auto"}`}>
         {/* Cabinet top marquee */}
-        <div className="relative overflow-hidden rounded-t-2xl border-2 border-b-0 border-[#00ff41] bg-gradient-to-b from-[#0a1a0a] to-black px-4 py-3 text-center">
-          <div className="absolute inset-0 bg-[repeating-linear-gradient(0deg,rgba(0,255,65,0.03)_0px,rgba(0,255,65,0.03)_1px,transparent_1px,transparent_3px)] pointer-events-none" />
-          <p className="font-mono text-[10px] uppercase tracking-[0.5em] text-[#00ff41]/60">★ Taito-inspired Arcade ★</p>
-          <h1 className="font-mono text-3xl font-black tracking-tight text-[#00ff41] neon-text sm:text-5xl marquee-glow">
-            QIX
-          </h1>
-          <p className="font-mono text-xs uppercase tracking-[0.3em] text-[#00ff41]/50">Territory Conquest</p>
-        </div>
+        {isAttract && (
+          <div className="relative overflow-hidden rounded-t-2xl border-2 border-b-0 border-[#00ff41] bg-gradient-to-b from-[#0a1a0a] to-black px-4 py-3 text-center">
+            <div className="absolute inset-0 bg-[repeating-linear-gradient(0deg,rgba(0,255,65,0.03)_0px,rgba(0,255,65,0.03)_1px,transparent_1px,transparent_3px)] pointer-events-none" />
+            <p className="font-mono text-[10px] uppercase tracking-[0.5em] text-[#00ff41]/60">★ Taito-inspired Arcade ★</p>
+            <h1 className="font-mono text-3xl font-black tracking-tight text-[#00ff41] neon-text sm:text-5xl marquee-glow">
+              QIX
+            </h1>
+            <p className="font-mono text-xs uppercase tracking-[0.3em] text-[#00ff41]/50">Territory Conquest</p>
+          </div>
+        )}
 
         {/* Screen area with CRT effects */}
-        <div className="relative crt-curve crt-scanlines crt-flicker overflow-hidden border-x-2 border-[#00ff41] bg-black">
+        <div className={`relative flex min-h-0 flex-1 flex-col overflow-hidden border-[#00ff41] bg-black ${isAttract ? "crt-curve border-x-2" : "border-0"} crt-scanlines crt-flicker`}>
           {/* HUD bar */}
-          <div className="flex items-center justify-between border-b border-[#00ff41]/30 bg-black/80 px-3 py-1.5 font-mono text-xs text-[#00ff41] sm:text-sm">
+          <div className="arcade-hud flex flex-wrap items-center justify-between border-b border-[#00ff41]/30 bg-black/80 px-2 py-1 font-mono text-[#00ff41] sm:px-3">
             <span className="flex items-center gap-1">
               <span className="text-[#00ff41]/60">LVL</span>
-              <span className="text-base font-black text-white">{hud.level}</span>
+              <span className="hud-value font-black text-white">{hud.level}</span>
             </span>
             <span className="flex items-center gap-1">
               <span className="text-[#00ff41]/60">SCORE</span>
-              <span className="text-base font-black text-white">{hud.score.toString().padStart(7, "0")}</span>
+              <span className="hud-value font-black text-white">{hud.score.toString().padStart(7, "0")}</span>
             </span>
             <span className="flex items-center gap-1">
               <span className="text-[#00ff41]/60">AREA</span>
-              <span className="text-base font-black text-white">{hud.percent}%</span>
+              <span className="hud-value font-black text-white">{hud.percent}%</span>
             </span>
             <span className="flex items-center gap-1">
               <span className="text-[#00ff41]/60">♥</span>
-              <span className="text-base font-black text-[#00ffff]">{hud.lives}</span>
+              <span className="hud-value font-black text-[#00ffff]">{hud.lives}</span>
             </span>
-            <span className={`text-base font-black ${hud.status === "playing" ? "text-[#00ff41]" : hud.status === "won" ? "text-yellow-400" : hud.status === "lost" ? "text-red-500" : "text-[#ff8c00]"}`}>
+            <span className={`hud-value font-black ${hud.status === "playing" ? "text-[#00ff41]" : hud.status === "won" ? "text-yellow-400" : hud.status === "lost" ? "text-red-500" : "text-[#ff8c00]"}`}>
               {statusText}
             </span>
           </div>
 
           {/* Game canvas */}
-          <div className="relative arcade-border">
+          <div className="game-screen-box relative">
             <canvas
               ref={canvasRef}
               width={COLS * CELL}
               height={ROWS * CELL}
-              className="block h-auto w-full [image-rendering:pixelated]"
+              style={{ width: '100%', height: '100%', display: 'block', imageRendering: 'pixelated' }}
               aria-label="Gioco arcade QIX"
             />
             {/* Message overlay */}
             {hud.message && hud.status !== "enterName" && hud.status !== "won" && !isAttract && (
-              <div className="absolute inset-x-0 top-1/2 mx-auto w-fit -translate-y-1/2 border border-[#00ff41]/60 bg-black/90 px-6 py-4 text-center font-mono text-sm uppercase tracking-widest text-[#00ff41] shadow-[0_0_30px_rgba(0,255,65,0.4)]">
+              <div className="arcade-popup absolute inset-x-0 top-1/2 mx-auto -translate-y-1/2 border border-[#00ff41]/60 bg-black/90 text-center font-mono uppercase tracking-widest text-[#00ff41] shadow-[0_0_30px_rgba(0,255,65,0.4)]">
                 {hud.message}
               </div>
             )}
@@ -1501,12 +1944,12 @@ export default function App() {
             {/* Level complete countdown */}
             {hud.status === "won" && !isAttract && (
               <div className="absolute inset-0 flex items-center justify-center bg-black/80">
-                <div className="border-2 border-yellow-400 bg-black px-8 py-6 text-center font-mono shadow-[0_0_40px_rgba(250,204,21,0.45)]">
-                  <h2 className="mb-4 text-2xl font-black uppercase tracking-widest text-yellow-400 sm:text-3xl">
+                <div className="arcade-popup border-2 border-yellow-400 bg-black text-center font-mono shadow-[0_0_40px_rgba(250,204,21,0.45)]">
+                  <h2 className="mb-3 text-[clamp(0.9rem,4vw,1.8rem)] font-black uppercase tracking-widest text-yellow-400">
                     Livello Completato
                   </h2>
-                  <p className="mb-5 text-lg font-black uppercase tracking-widest text-[#00ff41]">Get Ready !</p>
-                  <div className="mx-auto flex h-16 w-16 items-center justify-center border-2 border-[#00ff41] text-4xl font-black text-white shadow-[0_0_24px_rgba(0,255,65,0.35)]">
+                  <p className="mb-4 text-[clamp(0.7rem,3vw,1.125rem)] font-black uppercase tracking-widest text-[#00ff41]">Get Ready !</p>
+                  <div className="mx-auto flex h-12 w-12 items-center justify-center border-2 border-[#00ff41] text-[clamp(1.4rem,6vw,2.25rem)] font-black text-white shadow-[0_0_24px_rgba(0,255,65,0.35)] sm:h-16 sm:w-16">
                     {levelCountdown}
                   </div>
                 </div>
@@ -1515,16 +1958,16 @@ export default function App() {
 
             {/* Attract Mode: Splash Screen */}
             {isAttract && attractPhase === "splash" && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80">
-                <h1 className="mb-4 font-mono text-5xl font-black tracking-tight text-[#00ff41] neon-text sm:text-7xl">
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 px-4 text-center" onPointerDown={startGame}>
+                <h1 className="arcade-splash-title mb-3 font-mono font-black tracking-tight text-[#00ff41] neon-text">
                   QIX
                 </h1>
-                <p className="mb-8 font-mono text-sm uppercase tracking-[0.4em] text-[#00ff41]/60">Territory Conquest</p>
-                <p className={`font-mono text-xl font-black uppercase tracking-widest text-yellow-400 shadow-[0_0_20px_rgba(250,204,21,0.5)] transition-opacity duration-200 ${insertCoinBlink ? "opacity-100" : "opacity-0"}`}>
+                <p className="arcade-splash-subtitle mb-6 font-mono uppercase text-[#00ff41]/60">Territory Conquest</p>
+                <p className={`arcade-insert-coin font-mono font-black uppercase text-yellow-400 shadow-[0_0_20px_rgba(250,204,21,0.5)] transition-opacity duration-200 ${insertCoinBlink ? "opacity-100" : "opacity-0"}`}>
                   INSERT COIN
                 </p>
-                <p className="mt-6 font-mono text-[10px] uppercase tracking-widest text-[#00ff41]/30">
-                  Premi un tasto per giocare
+                <p className="mt-5 font-mono text-[clamp(0.42rem,2vw,0.65rem)] uppercase tracking-widest text-[#00ff41]/30">
+                  Premi un tasto
                 </p>
               </div>
             )}
@@ -1539,9 +1982,9 @@ export default function App() {
             {/* Attract Mode: High Scores */}
             {isAttract && attractPhase === "attractScores" && (
               <div className="absolute inset-0 flex items-center justify-center bg-black/90">
-                <div className="w-72 border-2 border-[#00ff41] bg-black p-4 font-mono shadow-[0_0_40px_rgba(0,255,65,0.5)]">
-                  <h2 className="mb-4 text-center text-xl font-black text-[#00ff41]">HIGH SCORES</h2>
-                  <table className="w-full text-xs">
+                <div className="arcade-popup border-2 border-[#00ff41] bg-black font-mono shadow-[0_0_40px_rgba(0,255,65,0.5)]">
+                  <h2 className="mb-3 text-center text-[clamp(0.8rem,3vw,1.25rem)] font-black text-[#00ff41]">HIGH SCORES</h2>
+                  <table className="w-full text-[clamp(0.42rem,1.7vw,0.75rem)]">
                     <thead>
                       <tr className="text-[#00ff41]/60">
                         <th className="pb-2 text-left">#</th>
@@ -1569,35 +2012,35 @@ export default function App() {
                       )}
                     </tbody>
                   </table>
-                  <p className={`mt-4 text-center text-xs font-black uppercase tracking-widest text-yellow-400 transition-opacity duration-200 ${insertCoinBlink ? "opacity-100" : "opacity-0"}`}>
+                  <p className={`mt-3 text-center text-[clamp(0.5rem,2vw,0.75rem)] font-black uppercase tracking-widest text-yellow-400 transition-opacity duration-200 ${insertCoinBlink ? "opacity-100" : "opacity-0"}`}>
                     INSERT COIN
                   </p>
                 </div>
               </div>
             )}
 
-            {/* Enter Name overlay */}
+            {/* Enter Name overlay (keyboard only) */}
             {hud.status === "enterName" && (
-              <div className="absolute inset-0 flex items-center justify-center bg-black/85">
-                <div className="border-2 border-[#00ff41] bg-black p-6 text-center font-mono shadow-[0_0_40px_rgba(0,255,65,0.5)]">
-                  <h2 className="mb-4 text-2xl font-black text-[#00ff41]">GAME OVER</h2>
-                  <p className="mb-2 text-sm text-[#00ff41]/70">Punteggio: {hud.score.toString().padStart(7, "0")}</p>
-                  <p className="mb-4 text-sm text-[#00ff41]/70">Livello: {hud.level}</p>
-                  <p className="mb-3 text-xs uppercase tracking-widest text-[#00ff41]/60">Inserisci le tue iniziali</p>
-                  <div className="mb-4 flex justify-center gap-2">
+              <div className="absolute inset-0 flex items-center justify-center bg-black/85 p-2">
+                <div className="arcade-popup border-2 border-[#00ff41] bg-black text-center font-mono shadow-[0_0_40px_rgba(0,255,65,0.5)]">
+                  <h2 className="mb-2 text-[clamp(0.9rem,2.4vw,1.5rem)] font-black text-[#00ff41]">GAME OVER</h2>
+                  <p className="mb-1 text-[clamp(0.48rem,1.4vw,0.8rem)] text-[#00ff41]/70">Punteggio: {hud.score.toString().padStart(7, "0")}</p>
+                  <p className="mb-2 text-[clamp(0.48rem,1.4vw,0.8rem)] text-[#00ff41]/70">Livello: {hud.level}</p>
+                  <p className="mb-3 text-[clamp(0.42rem,1.2vw,0.65rem)] uppercase tracking-widest text-[#00ff41]/60">Inserisci le iniziali</p>
+                  <div className="mb-3 flex justify-center gap-3">
                     {[0, 1, 2].map((i) => (
                       <div
                         key={i}
-                        className={`flex h-10 w-10 items-center justify-center border-2 text-2xl font-black ${
-                          initials.length === i ? "border-[#00ff41] text-[#00ff41]" : "border-[#00ff41]/40 text-[#00ff41]/60"
+                        className={`flex h-12 w-12 items-center justify-center border-2 text-2xl font-black ${
+                          initials.length === i ? "border-[#00ff41] text-[#00ff41] bg-[#00ff41]/10 animate-pulse" : "border-[#00ff41]/40 text-[#00ff41]/60 bg-black"
                         }`}
                       >
                         {initials[i] || "_"}
                       </div>
                     ))}
                   </div>
-                  <p className="text-[10px] uppercase tracking-widest text-[#00ff41]/40">
-                    {initials.length < 3 ? "Premi 3 lettere..." : "Premi INVIO per confermare"}
+                  <p className="text-[clamp(0.42rem,1.2vw,0.65rem)] uppercase tracking-widest text-[#00ff41]/40">
+                    Digita 3 lettere sulla tastiera
                   </p>
                 </div>
               </div>
@@ -1607,15 +2050,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Cabinet bottom with controls info */}
-        <div className="overflow-hidden rounded-b-2xl border-2 border-t-0 border-[#00ff41] bg-gradient-to-b from-black to-[#0a1a0a] px-4 py-3">
-          <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-1 font-mono text-[10px] uppercase tracking-widest text-[#00ff41]/50 sm:text-xs">
-            <span>↑↓←→ / WASD: Muovi</span>
-            <span>SPAZIO: Slow Mode (x2 punti)</span>
-            <span>P: Pausa</span>
-            <span>R: Torna al menu</span>
-          </div>
-        </div>
       </div>
     </main>
   );
